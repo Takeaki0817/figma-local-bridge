@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "TalkToFigma": {
+      "command": "bun",
+      "args": [
+        "src/talk_to_figma_mcp/server.ts"
+      ]
+    }
+  }
+}
