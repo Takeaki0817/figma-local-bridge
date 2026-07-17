@@ -2698,6 +2698,76 @@ server.tool(
   }
 );
 
+// Set Effect Tool
+server.tool(
+  "set_effect",
+  "Replace all effects on a node with the provided list (assigns node.effects). Pass effects:[] to clear every effect. SHADOW effects use color/offset/radius/spread; BLUR effects use only radius. Fails clearly if the node does not support effects.",
+  {
+    nodeId: z.string().describe("The ID of the node to set effects on"),
+    effects: z
+      .array(
+        z.object({
+          type: z
+            .enum(["DROP_SHADOW", "INNER_SHADOW", "LAYER_BLUR", "BACKGROUND_BLUR"])
+            .describe("Effect type"),
+          color: z
+            .object({
+              r: z.number().min(0).max(1).describe("Red component (0-1)"),
+              g: z.number().min(0).max(1).describe("Green component (0-1)"),
+              b: z.number().min(0).max(1).describe("Blue component (0-1)"),
+              a: z.number().min(0).max(1).describe("Alpha component (0-1)"),
+            })
+            .optional()
+            .describe("Shadow color in RGBA (0-1). Required for shadow effects."),
+          offset: z
+            .object({
+              x: z.number().describe("Horizontal shadow offset"),
+              y: z.number().describe("Vertical shadow offset"),
+            })
+            .optional()
+            .describe("Shadow offset {x,y}. Required for shadow effects."),
+          radius: z.number().min(0).describe("Blur/shadow radius"),
+          spread: z
+            .number()
+            .optional()
+            .describe("Shadow spread (shadow effects only)"),
+          visible: z
+            .boolean()
+            .optional()
+            .describe("Whether the effect is visible (default true)"),
+          blendMode: z
+            .string()
+            .optional()
+            .describe("Blend mode for shadow effects (default \"NORMAL\")"),
+        })
+      )
+      .describe("Effects to apply, replacing all existing effects. Empty array clears effects."),
+  },
+  async ({ nodeId, effects }: any) => {
+    try {
+      const result = await sendCommandToFigma("set_effect", { nodeId, effects });
+      const typedResult = result as { name: string; effects: unknown[] };
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Set ${typedResult.effects.length} effect(s) on "${typedResult.name}": ${JSON.stringify(typedResult.effects)}`,
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error setting effects: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+      };
+    }
+  }
+);
+
 // ===========================================================================
 // C. Variables
 // ===========================================================================
@@ -3125,6 +3195,7 @@ type FigmaCommand =
   | "set_parent"
   | "reorder_children"
   | "set_text_style"
+  | "set_effect"
   | "get_variables"
   | "create_variable_collection"
   | "create_variable"
@@ -3302,6 +3373,18 @@ type CommandParams = {
     textAutoResize?: "NONE" | "WIDTH_AND_HEIGHT" | "HEIGHT" | "TRUNCATE";
     textDecoration?: "NONE" | "UNDERLINE" | "STRIKETHROUGH";
     textCase?: "ORIGINAL" | "UPPER" | "LOWER" | "TITLE";
+  };
+  set_effect: {
+    nodeId: string;
+    effects: Array<{
+      type: "DROP_SHADOW" | "INNER_SHADOW" | "LAYER_BLUR" | "BACKGROUND_BLUR";
+      color?: { r: number; g: number; b: number; a: number };
+      offset?: { x: number; y: number };
+      radius: number;
+      spread?: number;
+      visible?: boolean;
+      blendMode?: string;
+    }>;
   };
   get_variables: {
     collectionId?: string;

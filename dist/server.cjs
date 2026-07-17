@@ -2289,6 +2289,55 @@ server.tool(
   }
 );
 server.tool(
+  "set_effect",
+  "Replace all effects on a node with the provided list (assigns node.effects). Pass effects:[] to clear every effect. SHADOW effects use color/offset/radius/spread; BLUR effects use only radius. Fails clearly if the node does not support effects.",
+  {
+    nodeId: import_zod.z.string().describe("The ID of the node to set effects on"),
+    effects: import_zod.z.array(
+      import_zod.z.object({
+        type: import_zod.z.enum(["DROP_SHADOW", "INNER_SHADOW", "LAYER_BLUR", "BACKGROUND_BLUR"]).describe("Effect type"),
+        color: import_zod.z.object({
+          r: import_zod.z.number().min(0).max(1).describe("Red component (0-1)"),
+          g: import_zod.z.number().min(0).max(1).describe("Green component (0-1)"),
+          b: import_zod.z.number().min(0).max(1).describe("Blue component (0-1)"),
+          a: import_zod.z.number().min(0).max(1).describe("Alpha component (0-1)")
+        }).optional().describe("Shadow color in RGBA (0-1). Required for shadow effects."),
+        offset: import_zod.z.object({
+          x: import_zod.z.number().describe("Horizontal shadow offset"),
+          y: import_zod.z.number().describe("Vertical shadow offset")
+        }).optional().describe("Shadow offset {x,y}. Required for shadow effects."),
+        radius: import_zod.z.number().min(0).describe("Blur/shadow radius"),
+        spread: import_zod.z.number().optional().describe("Shadow spread (shadow effects only)"),
+        visible: import_zod.z.boolean().optional().describe("Whether the effect is visible (default true)"),
+        blendMode: import_zod.z.string().optional().describe('Blend mode for shadow effects (default "NORMAL")')
+      })
+    ).describe("Effects to apply, replacing all existing effects. Empty array clears effects.")
+  },
+  async ({ nodeId, effects }) => {
+    try {
+      const result = await sendCommandToFigma("set_effect", { nodeId, effects });
+      const typedResult = result;
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Set ${typedResult.effects.length} effect(s) on "${typedResult.name}": ${JSON.stringify(typedResult.effects)}`
+          }
+        ]
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error setting effects: ${error instanceof Error ? error.message : String(error)}`
+          }
+        ]
+      };
+    }
+  }
+);
+server.tool(
   "get_variables",
   "List local variable collections (with their modes) and variables (id, name, resolvedType, valuesByMode). Optionally filter to a single collection.",
   {

@@ -259,6 +259,10 @@ async function handleCommand(command, params) {
       return await reorderChildren(params);
     case "set_text_style":
       return await setTextStyle(params);
+    case "set_effect":
+      return await setEffect(params);
+    case "set_clips_content":
+      return await setClipsContent(params);
     case "get_variables":
       return await getVariables(params);
     case "create_variable_collection":
@@ -395,6 +399,56 @@ function filterFigmaNode(node) {
 
   if (node.cornerRadius !== undefined) {
     filtered.cornerRadius = node.cornerRadius;
+  }
+
+  if (node.clipsContent !== undefined) {
+    filtered.clipsContent = node.clipsContent;
+  }
+
+  // Auto Layout / sizing fields — passed through when present so downstream
+  // compliance checks can read padding, sizing mode, and spacing.
+  if (node.layoutMode !== undefined) {
+    filtered.layoutMode = node.layoutMode;
+  }
+  if (node.layoutSizingHorizontal !== undefined) {
+    filtered.layoutSizingHorizontal = node.layoutSizingHorizontal;
+  }
+  if (node.layoutSizingVertical !== undefined) {
+    filtered.layoutSizingVertical = node.layoutSizingVertical;
+  }
+  if (node.paddingTop !== undefined) {
+    filtered.paddingTop = node.paddingTop;
+  }
+  if (node.paddingRight !== undefined) {
+    filtered.paddingRight = node.paddingRight;
+  }
+  if (node.paddingBottom !== undefined) {
+    filtered.paddingBottom = node.paddingBottom;
+  }
+  if (node.paddingLeft !== undefined) {
+    filtered.paddingLeft = node.paddingLeft;
+  }
+  if (node.itemSpacing !== undefined) {
+    filtered.itemSpacing = node.itemSpacing;
+  }
+
+  if (node.effects && node.effects.length > 0) {
+    filtered.effects = node.effects.map((effect) => {
+      var processedEffect = Object.assign({}, effect);
+      delete processedEffect.boundVariables;
+      // Match the fills/strokes convention: convert 0-1 RGBA colors to hex.
+      if (processedEffect.color) {
+        processedEffect.color = rgbaToHex(processedEffect.color);
+      }
+      return processedEffect;
+    });
+  }
+
+  // Node-level variable bindings (kept as-is). The per-paint boundVariables
+  // inside fills/strokes are still stripped above; only the node's own
+  // boundVariables map is passed through here.
+  if (node.boundVariables) {
+    filtered.boundVariables = node.boundVariables;
   }
 
   if (node.absoluteBoundingBox) {
@@ -4392,6 +4446,111 @@ async function setTextStyle(params) {
     id: node.id,
     name: node.name,
     applied: applied,
+  };
+}
+
+// Toggle a frame's "clip content" flag. Frames are created with
+// clipsContent=true by the Figma API, which cuts off outward drawing such as
+// drop shadows of children; wrappers usually need it off.
+async function setClipsContent(params) {
+  const { nodeId, clipsContent } = params || {};
+
+  if (!nodeId) {
+    throw new Error("Missing nodeId parameter");
+  }
+  if (typeof clipsContent !== "boolean") {
+    throw new Error("Missing or invalid clipsContent parameter (expected boolean)");
+  }
+
+  const node = await figma.getNodeByIdAsync(nodeId);
+  if (!node) {
+    throw new Error(`Node not found with ID: ${nodeId}`);
+  }
+  if (!("clipsContent" in node)) {
+    throw new Error(`Node does not support clipsContent: ${nodeId} (type ${node.type})`);
+  }
+
+  node.clipsContent = clipsContent;
+
+  return {
+    id: node.id,
+    name: node.name,
+    clipsContent: node.clipsContent,
+  };
+}
+
+// Replace all effects on a node (assigns node.effects). SHADOW effects build
+// color/offset/radius/spread/blendMode; BLUR effects use only radius. Passing
+// an empty array clears every effect on the node.
+async function setEffect(params) {
+  const { nodeId, effects } = params || {};
+
+  if (!nodeId) {
+    throw new Error("Missing nodeId parameter");
+  }
+  if (!Array.isArray(effects)) {
+    throw new Error("Missing or invalid effects parameter (expected an array)");
+  }
+
+  const node = await figma.getNodeByIdAsync(nodeId);
+  if (!node) {
+    throw new Error(`Node not found with ID: ${nodeId}`);
+  }
+  if (!("effects" in node)) {
+    throw new Error(`Node does not support effects: ${nodeId} (type ${node.type})`);
+  }
+
+  // Build a plain Effect object per entry. Shadow and blur effects have
+  // different required fields, so we branch on type rather than passing the
+  // raw input straight through (which would let invalid fields reach the API).
+  const built = effects.map((e, i) => {
+    if (!e || typeof e !== "object") {
+      throw new Error(`effects[${i}] is not an object`);
+    }
+    const type = e.type;
+    const visible = e.visible !== undefined ? e.visible : true;
+
+    if (type === "DROP_SHADOW" || type === "INNER_SHADOW") {
+      if (!e.color) {
+        throw new Error(`effects[${i}] (${type}) requires a color`);
+      }
+      if (!e.offset) {
+        throw new Error(`effects[${i}] (${type}) requires an offset`);
+      }
+      if (typeof e.radius !== "number") {
+        throw new Error(`effects[${i}] (${type}) requires a numeric radius`);
+      }
+      return {
+        type: type,
+        color: e.color,
+        offset: e.offset,
+        radius: e.radius,
+        spread: e.spread !== undefined ? e.spread : 0,
+        visible: visible,
+        blendMode: e.blendMode !== undefined ? e.blendMode : "NORMAL",
+      };
+    }
+
+    if (type === "LAYER_BLUR" || type === "BACKGROUND_BLUR") {
+      if (typeof e.radius !== "number") {
+        throw new Error(`effects[${i}] (${type}) requires a numeric radius`);
+      }
+      return {
+        type: type,
+        radius: e.radius,
+        visible: visible,
+      };
+    }
+
+    throw new Error(`effects[${i}] has unknown type: ${String(type)}`);
+  });
+
+  node.effects = built;
+
+  return {
+    id: node.id,
+    name: node.name,
+    effects: node.effects,
   };
 }
 
