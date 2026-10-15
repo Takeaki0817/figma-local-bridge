@@ -87,7 +87,10 @@ figma.ui.onmessage = async (msg) => {
       figma.closePlugin();
       break;
     case "execute-command":
-      // Execute commands received from UI (which gets them from WebSocket)
+      // Execute commands received from UI (which gets them from WebSocket).
+      // A command aimed at another file is left to the plugin running there: every plugin on
+      // the channel receives it, even in a background tab.
+      if (msg.params && msg.params.targetFile && msg.params.targetFile !== figma.root.name) break;
       try {
         const result = await handleCommand(msg.command, msg.params);
         figma.ui.postMessage({
@@ -99,7 +102,7 @@ figma.ui.onmessage = async (msg) => {
         figma.ui.postMessage({
           type: "command-error",
           id: msg.id,
-          error: error.message || "Error executing command",
+          error: (error && error.message) || String(error) || "Error executing command",
         });
       }
       break;
@@ -127,6 +130,13 @@ async function handleCommand(command, params) {
   switch (command) {
     case "get_document_info":
       return await getDocumentInfo();
+    case "get_file_info":
+      // which file this plugin runs in, so a writer can refuse the wrong one
+      return { name: figma.root.name, pages: figma.root.children.map((p) => p.name) };
+    case "close_plugin":
+      // stop this plugin (and its connection) after replying
+      setTimeout(() => figma.closePlugin(), 300);
+      return { closing: figma.root.name };
     case "get_selection":
       return await getSelection();
     case "get_node_info":
@@ -5216,10 +5226,16 @@ async function buildSpecNode(spec, parent, ctx) {
     if (base.decoration && base.decoration !== "NONE") node.textDecoration = base.decoration;
     node.fills = [await boundPaint(base.fill, ctx.tokens)];
     for (const run of base.runs || []) {
-      if (run.weight && run.weight !== base.weight) {
-        node.setRangeFontName(run.start, run.end, await specFont(base.family, run.weight));
+      const runStyle = run.textStyle && ctx.tokens.textStyles && ctx.tokens.textStyles[run.textStyle];
+      if (runStyle) {
+        // a bold or larger part keeps a text style instead of a loose font
+        await node.setRangeTextStyleIdAsync(run.start, run.end, runStyle);
+      } else {
+        if (run.weight && run.weight !== base.weight) {
+          node.setRangeFontName(run.start, run.end, await specFont(base.family, run.weight));
+        }
+        if (run.size && run.size !== base.size) node.setRangeFontSize(run.start, run.end, run.size);
       }
-      if (run.size && run.size !== base.size) node.setRangeFontSize(run.start, run.end, run.size);
       if (run.fill) node.setRangeFills(run.start, run.end, [await boundPaint(run.fill, ctx.tokens)]);
     }
     node.name = spec.name || base.characters.slice(0, 24);
@@ -5253,6 +5269,7 @@ async function buildSpecNode(spec, parent, ctx) {
     const inAuto = placeInParent(node, spec, parent);
     node.resize(Math.max(spec.w, 0.01), Math.max(spec.h, 0.01));
     applySizing(node, spec, inAuto);
+    if (spec.opacity !== undefined && spec.opacity !== 1) node.opacity = spec.opacity;
   } else if (spec.type === "INSTANCE") {
     const comp = await figma.getNodeByIdAsync(ctx.components[spec.component] || spec.componentId);
     if (!comp) throw new Error("Unknown component: " + spec.component);
@@ -5363,22 +5380,34 @@ async function buildTree(params) {
   const spec = Object.assign({}, tree);
   if (x !== undefined) spec.x = x;
   if (y !== undefined) spec.y = y;
-  const root = await buildSpecNode(spec, parent, ctx);
+  // a build that fails half way leaves nothing behind, so the caller can simply retry
+  const before = new Set(parent.children.map((c) => c.id));
+  let root;
+  try {
+    root = await buildSpecNode(spec, parent, ctx);
+  } catch (e) {
+    for (const c of [...parent.children]) if (!before.has(c.id)) c.remove();
+    throw e;
+  }
   let grewBy = 0;
   if (parent.type === "PAGE" && root.layoutMode === "VERTICAL" && root.layoutSizingVertical === "FIXED") {
-    // Figma rounds each text box up to whole pixels; on long pages this adds up and the
-    // last section (the footer) would be cut off. Grow the frame and say why.
+    // Figma rounds each text box up to whole pixels and breaks some Japanese lines later than
+    // the browser (no line may start with ー); the last section would be cut off. Grow the
+    // frame and say why.
     const flow = root.children.filter((c) => c.layoutPositioning !== "ABSOLUTE");
-    const fills = flow.some((c) => c.layoutSizingVertical === "FILL");
-    if (!fills && flow.length) {
-      const last = flow[flow.length - 1];
+    // a child that fills the height (main with flex-1) hides an overflow: measure it hugging
+    const filling = flow.filter((c) => c.layoutSizingVertical === "FILL");
+    for (const c of filling) c.layoutSizingVertical = "HUG";
+    const contentH = flow.reduce((a, c) => a + c.height, 0) + root.itemSpacing * Math.max(0, flow.length - 1) + root.paddingTop + root.paddingBottom;
+    for (const c of filling) c.layoutSizingVertical = "FILL";
+    if (flow.length) {
       // whole pixels, so the frame's H reads as a plain number
-      const needed = Math.ceil(last.y + last.height + root.paddingBottom - 0.01);
+      const needed = Math.ceil(contentH - 0.01);
       if (needed > root.height + 0.5) {
         grewBy = Math.round((needed - root.height) * 100) / 100;
         root.resize(root.width, needed);
         const prev = root.getSharedPluginData("figma_local_bridge", "sourceH");
-        root.setSharedPluginData("figma_local_bridge", "sourceH", `${prev}; +${grewBy}px because Figma rounds text heights up to whole pixels`);
+        root.setSharedPluginData("figma_local_bridge", "sourceH", `${prev}; +${grewBy}px because Figma's text is taller than the browser's (whole-pixel line heights, or a Japanese line break the browser allows but Figma does not)`);
       }
     }
   }
@@ -5450,6 +5479,8 @@ async function dumpNode(node, depth, maxDepth) {
   if (node.type === "TEXT") {
     out.characters = node.characters;
     out.textStyleId = typeof node.textStyleId === "string" ? node.textStyleId : "mixed";
+    // mixed: say whether every part has a text style (bold words inside a sentence)
+    if (out.textStyleId === "mixed") out.textStyleAllRanges = node.getStyledTextSegments(["textStyleId"]).every((seg) => !!seg.textStyleId);
     out.fontSize = node.fontSize;
   }
   if ((node.type === "COMPONENT" || node.type === "COMPONENT_SET") && node.description) out.description = node.description;

@@ -7,7 +7,9 @@
 //     [--specs-only]
 //
 // screens.json entries: { "name": "home", "path": "/", "label": "記事一覧（トップ）" }
-// The plugin's current file must be the target file (check with dump_tree first).
+// The plugin's current file must be the target file: pass --expect-file <file name> and the
+// build stops before writing anything when the plugin runs in another file (or more than one
+// plugin answers on the channel, which the relay log shows as "Broadcast to 2 peer(s)").
 // Layout on the canvas follows the skill's standard: Design page with all mobile frames,
 // then all desktop frames, 100px apart; component masters on the Components page.
 
@@ -112,6 +114,15 @@ const masters = new Map(); // "PostCard/SP" -> master spec
 // Components whose look does not change with the viewport but with their text become
 // one set with a state property instead (e.g. StatusBadge: Status=公開 / Status=下書き).
 const stateProps = Object.fromEntries((arg("state-components", "") || "").split(",").filter(Boolean).map((x) => x.split(":")));
+// --variant-labels "TodoItem=未完了|完了": uses of a component that differ in structure become
+// variants of a 状態 property (most common first), instead of loose frames
+const variantLabels = Object.fromEntries((arg("variant-labels", "") || "").split(",").filter(Boolean).map((x) => { const [n, v] = x.split("="); return [n, v.split("|")]; }));
+const variantKey = (name, variantName) => {
+  const props = Object.fromEntries(variantName.split(",").map((p) => p.trim().split("=")));
+  const labels = variantLabels[name];
+  const vp = props.Viewport || Object.values(props)[0];
+  return labels && props["状態"] && props["状態"] !== labels[0] ? `${name}/${vp}/${props["状態"]}` : `${name}/${vp}`;
+};
 const firstText = (s) => (s.type === "TEXT" ? s.text.characters : (s.children || []).map(firstText).find(Boolean));
 for (const [name, prop] of Object.entries(stateProps)) {
   const occs = [];
@@ -149,12 +160,16 @@ for (const name of componentNames.filter((n) => !stateProps[n])) {
       if (!bySig.has(sig)) bySig.set(sig, []);
       bySig.get(sig).push(o);
     }
-    const [sig, group] = [...bySig.entries()].sort((a, b) => b[1].length - a[1].length)[0];
+    const ranked = [...bySig.entries()].sort((a, b) => b[1].length - a[1].length);
     const totalUses = occs.length;
     if (totalUses < 2 && !flag("all-components")) continue;
+    const labels = variantLabels[name];
+    const groups = labels ? ranked.slice(0, labels.length) : ranked.slice(0, 1);
+    groups.forEach(([sig, group], gi) => {
     const master = JSON.parse(JSON.stringify(group[0].s));
     master.type = "COMPONENT";
-    master.name = `Viewport=${vp}`;
+    master.name = labels ? `Viewport=${vp}, 状態=${labels[gi]}` : `Viewport=${vp}`;
+    const mkey = gi === 0 ? `${name}/${vp}` : `${name}/${vp}/${labels[gi]}`;
     master.absolute = false;
     master.x = 0;
     master.y = 0;
@@ -167,13 +182,13 @@ for (const name of componentNames.filter((n) => !stateProps[n])) {
       sourceW: occ.h === "HUG" && auto ? undefined : occ.sourceW || `width where it is used (${master.w}px); instances ${occ.h === "FILL" ? "fill their container" : "keep it"}`,
       sourceH: occ.v === "HUG" && auto ? undefined : occ.sourceH || `height where it is used (${master.h}px); instances ${occ.v === "FILL" ? "fill their container" : "keep it"}`,
     };
-    masters.set(`${name}/${vp}`, { master, name, vp });
+    masters.set(mkey, { master, name, vp });
     for (const o of group) {
       const overrides = [];
       diff(group[0].s, o.s, [], overrides);
       const inst = {
         type: "INSTANCE",
-        component: `${name}/${vp}`,
+        component: mkey,
         name,
         w: o.s.w,
         h: o.s.h,
@@ -185,12 +200,14 @@ for (const name of componentNames.filter((n) => !stateProps[n])) {
       };
       o.parent.children[o.index] = inst;
     }
+    });
   }
 }
 
 // Viewport variants that differ only in their sizes collapse into one component.
 const stripSizes = (spec) => JSON.stringify(spec, (k, v) => (["w", "h", "x", "y", "sizing", "name"].includes(k) ? undefined : v));
 for (const name of componentNames) {
+  if (variantLabels[name]) continue;
   const sp = masters.get(`${name}/SP`), pc = masters.get(`${name}/PC`);
   if (!sp || !pc || stripSizes(sp.master) !== stripSizes(pc.master)) continue;
   masters.delete(`${name}/PC`);
@@ -221,6 +238,38 @@ for (const name of images) {
 }
 
 const figma = await connectFigma();
+// Figma sometimes answers "Unable to establish connection to Figma" for a moment; the plugin
+// removes a half-built tree, so one more try is safe
+async function buildTree(params, timeout) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await figma.call("build_tree", params, timeout);
+    } catch (e) {
+      if (attempt >= 3 || !/Unable to establish connection/i.test(String(e.message || e))) throw e;
+      console.error(`build_tree failed (${String(e.message || e).slice(0, 80)}), retrying`);
+      await new Promise((r) => setTimeout(r, 3000 * attempt));
+    }
+  }
+}
+const expectFile = arg("expect-file");
+if (!expectFile && !flag("specs-only")) {
+  console.error("--expect-file <file name> is required: it keeps a build from writing into another open file");
+  figma.close();
+  process.exit(2);
+}
+if (expectFile) {
+  // every plugin on the channel would receive the writes: exactly one, in the expected file
+  const answers = await figma.callAll("get_file_info", {}, 3000);
+  const names = answers.map((a) => (a && a.name) || (a && a.error) || "?");
+  if (answers.length !== 1 || names[0] !== expectFile) {
+    console.error(`plugins answering: ${answers.length} (${names.join(", ") || "none"}); expected one in "${expectFile}"; nothing was written`);
+    figma.close();
+    process.exit(2);
+  }
+  // and every command carries the file name, so a plugin in another file ignores it
+  const rawCall = figma.call;
+  figma.call = (command, params = {}, timeout) => rawCall(command, { ...params, targetFile: expectFile }, timeout);
+}
 const manifest = { builtAt: new Date().toISOString(), pages: {}, tokens: {}, components: {}, screens: {} };
 if (COURSE) {
   try {
@@ -255,7 +304,7 @@ try {
     const ids = [];
     let cx = 0;
     for (const [key, m] of list) {
-      const r = await figma.call("build_tree", { tree: m.master, images: imagePayload, tokens: manifest.tokens, x: cx, y: cy }, 180000);
+      const r = await buildTree({ tree: m.master, images: imagePayload, tokens: manifest.tokens, x: cx, y: cy }, 180000);
       ids.push(r.rootId);
       componentIds[key] = r.rootId;
       cx += r.width + GAP;
@@ -277,10 +326,7 @@ try {
       continue;
     }
     const set = await figma.call("combine_variants", { componentIds: ids, name, x: 0, y: cy, description });
-    for (const v of set.variants) {
-      const vp = v.name.split("=")[1];
-      componentIds[`${name}/${vp}`] = v.id;
-    }
+    for (const v of set.variants) componentIds[variantKey(name, v.name)] = v.id;
     manifest.components[name] = set;
     cy += set.height + GAP;
     console.log(JSON.stringify({ component: name, variants: set.variants.length }));
@@ -294,7 +340,7 @@ try {
       x += b.spec.w + GAP;
       continue;
     }
-    const r = await figma.call("build_tree", { tree: b.spec, images: imagePayload, tokens: manifest.tokens, components: componentIds, x, y: 0 }, 300000);
+    const r = await buildTree({ tree: b.spec, images: imagePayload, tokens: manifest.tokens, components: componentIds, x, y: 0 }, 300000);
     manifest.screens[b.key] = { id: r.rootId, name: r.name, x, width: r.width, height: r.height, docHeight: b.docHeight, created: r.createdCount };
     console.log(JSON.stringify({ screen: b.key, id: r.rootId, w: r.width, h: r.height, docHeight: b.docHeight, nodes: r.createdCount }));
     x += b.spec.w + GAP;
@@ -308,7 +354,7 @@ try {
 // ---------- course layout ----------
 function textSpec(characters, size, weight, opts = {}) {
   return {
-    type: "TEXT", name: opts.name || characters.slice(0, 24), w: opts.w || 10, h: Math.round(size * 1.6),
+    type: "TEXT", name: opts.name || characters.replace(/\n/g, " ").slice(0, 40), w: opts.w || 10, h: Math.round(size * 1.6),
     sizing: { h: opts.w ? "FILL" : "HUG", v: "HUG" },
     text: { characters, family: "Noto Sans JP", weight, size, lineHeight: opts.lineHeight || null, letterSpacing: 0, align: "LEFT", fill: { color: opts.color || { r: 0.2, g: 0.2, b: 0.2 }, opacity: 1, variable: opts.variable }, runs: [] },
   };
@@ -375,7 +421,7 @@ async function buildCourse() {
     const ids = [];
     let cx = -20000;
     for (const [key, m] of list) {
-      const r = await figma.call("build_tree", { tree: m.master, images: imagePayload, tokens: manifest.tokens, x: cx, y: tmpY }, 180000);
+      const r = await buildTree({ tree: m.master, images: imagePayload, tokens: manifest.tokens, x: cx, y: tmpY }, 180000);
       ids.push(r.rootId);
       componentIds[key] = r.rootId;
       cx += r.width + GAP;
@@ -392,7 +438,7 @@ async function buildCourse() {
       sets.push({ name, id: ids[0] });
     } else {
       const set = await figma.call("combine_variants", { componentIds: ids, name, x: -20000, y: tmpY, description });
-      for (const v of set.variants) componentIds[`${name}/${v.name.split("=")[1]}`] = v.id;
+      for (const v of set.variants) componentIds[variantKey(name, v.name)] = v.id;
       manifest.components[name] = set;
       sets.push({ name, id: set.id });
     }
@@ -402,10 +448,13 @@ async function buildCourse() {
 
   // コンポーネント frame: title, then "・label" and the component, top to bottom
   const compChildren = [headingSpec("コンポーネント", 760)];
+  // --components-note "...": one line under the heading (which screens the parts come from)
+  if (arg("components-note")) compChildren.push(textSpec(arg("components-note"), 14, 400, { color: { r: 0.33, g: 0.33, b: 0.33 } }));
   for (const st of sets) compChildren.push(textSpec(`・${componentLabels[st.name] || st.name}`, 18, 700, { name: componentLabels[st.name] || st.name }));
-  const comp = await figma.call("build_tree", { tree: sectionFrame("コンポーネント", 1566, 1200, compChildren), tokens: manifest.tokens, x: 0, y: 0 }, 120000);
+  const comp = await buildTree({ tree: sectionFrame("コンポーネント", 1566, 1200, compChildren), tokens: manifest.tokens, x: 0, y: 0 }, 120000);
+  const lead = arg("components-note") ? 2 : 1; // heading (and note) before the first label
   for (let i = 0; i < sets.length; i++) {
-    await figma.call("set_parent", { nodeId: sets[i].id, parentId: comp.rootId, index: 2 + i * 2 });
+    await figma.call("set_parent", { nodeId: sets[i].id, parentId: comp.rootId, index: lead + 1 + i * 2 });
   }
   let compDump = await figma.call("dump_tree", { nodeId: comp.rootId, maxDepth: 0 });
   // text heights leave a fraction; pad the bottom so the frame's H reads as a whole number
@@ -446,7 +495,7 @@ async function buildCourse() {
       children.push(block);
     }
     const sgSpec = sectionFrame("スタイルガイド", 1366, 2000, children, { padding: [120, 303, 120, 303], gap: 120 });
-    const sgr = await figma.call("build_tree", { tree: sgSpec, tokens: manifest.tokens, x, y: 0 }, 120000);
+    const sgr = await buildTree({ tree: sgSpec, tokens: manifest.tokens, x, y: 0 }, 120000);
     manifest.frames.styleGuide = { id: sgr.rootId, w: sgr.width, h: sgr.height };
     x += sgr.width + GAP;
   }
@@ -455,7 +504,7 @@ async function buildCourse() {
   if (ogpPath) {
     const ogp = { type: "FRAME", name: "blog_OGP", w: 1200, h: 630, sizing: { h: "FIXED", v: "FIXED", sourceW: "OGP 1200x630", sourceH: "OGP 1200x630" }, layout: { mode: "NONE" }, fills: [], clips: true,
       children: [{ type: "IMAGE", name: "blog_ogp", image: "blog_ogp", w: 1200, h: 630, x: 0, y: 0, sizing: { h: "FIXED", v: "FIXED" } }] };
-    const r = await figma.call("build_tree", { tree: ogp, images: imagePayload, tokens: manifest.tokens, x: compDump.w - 1200, y: compDump.h + GAP }, 120000);
+    const r = await buildTree({ tree: ogp, images: imagePayload, tokens: manifest.tokens, x: compDump.w - 1200, y: compDump.h + GAP }, 120000);
     manifest.frames.ogp = { id: r.rootId };
   }
 
@@ -465,7 +514,7 @@ async function buildCourse() {
       const b = built.find((q) => q.screen.name === sc.name && q.width === width);
       if (!b) continue;
       if (only.length && !only.includes(b.key)) { x += b.spec.w + GAP; continue; }
-      const r = await figma.call("build_tree", { tree: b.spec, images: imagePayload, tokens: manifest.tokens, components: componentIds, x, y: 0 }, 300000);
+      const r = await buildTree({ tree: b.spec, images: imagePayload, tokens: manifest.tokens, components: componentIds, x, y: 0 }, 300000);
       manifest.screens[b.key] = { id: r.rootId, name: r.name, x, width: r.width, height: r.height, docHeight: b.docHeight, created: r.createdCount };
       console.log(JSON.stringify({ screen: b.key, id: r.rootId, w: r.width, h: r.height, docHeight: b.docHeight, nodes: r.createdCount }));
       x += b.spec.w + GAP;

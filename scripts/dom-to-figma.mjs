@@ -149,13 +149,13 @@ export function textStyleName(size, weight, lineHeight) {
     const lh = lineHeight === null ? "normal" : String(round2(lineHeight / size));
     return `${round2(size)}px/${w}/${lh}`;
   }
-  const sizeName = TW_SIZE[size] ? `text-${TW_SIZE[size]}` : `text-${round2(size)}px`;
+  const sizeName = TW_SIZE[size] ? `text-${TW_SIZE[size]}` : `text-[${round2(size)}px]`;
   const w = TW_WEIGHT[weight] || String(weight);
   let lead = "";
   if (lineHeight === null) lead = "/leading-auto";
   else if (TW_LEADING[size] === undefined || Math.abs(TW_LEADING[size] - lineHeight) > 0.1) {
     const ratio = round3(lineHeight / size);
-    lead = LEADING_NAMES[ratio] ? `/leading-${LEADING_NAMES[ratio]}` : `/leading-${round2(lineHeight)}px`;
+    lead = LEADING_NAMES[ratio] ? `/leading-${LEADING_NAMES[ratio]}` : `/leading-[${round2(lineHeight)}px]`;
   }
   return `${sizeName}/${w}${lead}`;
 }
@@ -231,6 +231,9 @@ let NAMING = null;
 
 function nodeName(n) {
   if (n.component) return n.component;
+  // the outermost element of a React component is named after it (TodoItem, AppLayout)
+  // (icons keep icon/<name>, the same in every screen)
+  if (NAMING !== "class" && n.tag !== "svg" && n.reactName && !/^(Anonymous|Fragment)$/.test(n.reactName)) return n.reactName;
   if (NAMING === "class" && n.tag !== "svg") {
     const first = classList(n)[0];
     if (first) return first;
@@ -274,7 +277,9 @@ function normalize(n, ancestors) {
   w.content = contentBox(n);
   if (n.tag === "input" || n.tag === "textarea" || n.tag === "select") {
     const showsPlaceholder = !n.value && n.placeholder;
-    const chars = n.value || n.placeholder || "";
+    // a checkbox or radio has a value ("on") that is never drawn
+    const drawsValue = n.tag !== "input" || !/^(checkbox|radio|range|color|file|hidden)$/.test(n.inputType || "");
+    const chars = drawsValue ? n.value || n.placeholder || "" : "";
     if (chars) {
       const lh = n.style.lineHeight;
       const lines = n.tag === "textarea" ? 1 : 1;
@@ -309,6 +314,60 @@ function normalize(n, ancestors) {
         constraints: { horizontal: "MAX", vertical: "CENTER" },
       });
     }
+    const hexOf = (col) => {
+      const c = parseColor(col) || { r: 0, g: 0, b: 0, a: 1 };
+      return "#" + [c.r, c.g, c.b].map((v) => Math.round(v * 255).toString(16).padStart(2, "0")).join("");
+    };
+    if (n.tag === "input" && n.inputType === "checkbox" && n.before && n.before.opacity !== "0") {
+      // daisyUI draws the check with a clipped ::before shown only when checked; draw a check
+      // of the same color in its place
+      const size = round2(Math.min(n.box.w, n.box.h) * 0.7);
+      w.children.push({
+        kind: "svg",
+        tag: "svg",
+        chain,
+        style: n.style,
+        absolute: true,
+        box: { x: n.box.x + (n.box.w - size) / 2, y: n.box.y + (n.box.h - size) / 2, w: size, h: size },
+        svgOverride: `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="${hexOf(n.before.backgroundColor)}" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>`,
+        name: "icon/check",
+        constraints: { horizontal: "CENTER", vertical: "CENTER" },
+      });
+    }
+    if (n.tag === "input" && n.inputType === "date") {
+      // the calendar button the browser draws at the right end of a date field
+      w.children.push({
+        kind: "svg",
+        tag: "svg",
+        chain,
+        style: n.style,
+        absolute: true,
+        box: { x: n.box.x + n.box.w - n.style.padding[1] - 14, y: n.box.y + (n.box.h - 14) / 2, w: 14, h: 14 },
+        svgOverride: `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="${hexOf(n.style.color)}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>`,
+        name: "icon/calendar",
+        constraints: { horizontal: "MAX", vertical: "CENTER" },
+      });
+    }
+    return w;
+  }
+  if (n.tag === "progress" && n.progress && n.progress.position >= 0) {
+    // the filled part (value / max) is drawn outside the DOM; draw it as a shape
+    const pw = round2(n.box.w * n.progress.position), ph = round2(n.box.h);
+    const r = Math.min((n.style.radius || [0])[0] || 0, ph / 2, pw / 2);
+    const pc = parseColor(n.progress.color) || { r: 0, g: 0, b: 0, a: 1 };
+    const hex = "#" + [pc.r, pc.g, pc.b].map((v) => Math.round(v * 255).toString(16).padStart(2, "0")).join("");
+    const d = r > 0 ? `M${r} 0H${pw - r}A${r} ${r} 0 0 1 ${pw - r} ${ph}H${r}A${r} ${r} 0 0 1 ${r} 0Z` : `M0 0H${pw}V${ph}H0Z`;
+    if (pw > 0) w.children.push({
+      kind: "svg",
+      tag: "svg",
+      chain,
+      style: n.style,
+      absolute: true,
+      box: { x: n.box.x, y: n.box.y, w: pw, h: ph },
+      svgOverride: `<svg xmlns="http://www.w3.org/2000/svg" width="${pw}" height="${ph}" viewBox="0 0 ${pw} ${ph}"><path d="${d}" fill="${hex}"/></svg>`,
+      name: "progress-value",
+      constraints: { horizontal: "MIN", vertical: "CENTER" },
+    });
     return w;
   }
   if (n.text) {
@@ -327,15 +386,18 @@ function normalize(n, ancestors) {
     }
     const cbx = w.content;
     const blockLine = !/flex|grid/.test(n.style.display) && lines === 1 && lh && Math.abs(cbx.h - h) <= 1;
+    // text cut off with "…" (Tailwind truncate) is as wide as its box, not as its words
+    const cut = n.style.textOverflow === "ellipsis" && /nowrap/.test(n.style.whiteSpace || "");
     w.children.push({
       kind: "text",
       tag: "#text",
       chain,
       style: { ...n.style, margin: [0, 0, 0, 0], lineClamp: "none" },
       runs: n.text,
-      box: { x: tb.x, y: blockLine ? cbx.y : tb.y + tb.h / 2 - h / 2, w: tb.w, h },
-      textBox: tb,
+      box: { x: cut ? cbx.x : tb.x, y: blockLine ? cbx.y : tb.y + tb.h / 2 - h / 2, w: cut ? cbx.w : tb.w, h },
+      textBox: cut ? { ...tb, x: cbx.x, w: cbx.w } : tb,
       lineCount: lines,
+      fillWidth: cut || undefined,
     });
     return w;
   }
@@ -408,8 +470,9 @@ function pseudoBorderSvg(n, ps) {
 function simplify(w) {
   if (w.kind !== "frame") return w;
   w.children = w.children.map(simplify).filter(Boolean);
-  // Drop empty, invisible wrappers.
-  if (w.children.length === 0 && !isVisual(w)) return null;
+  // Drop empty, invisible wrappers; an empty box with a set width (w-24) is a spacer that
+  // keeps a flex row balanced, so it stays
+  if (w.children.length === 0 && !isVisual(w)) return w.box.w >= 1 && fixedClass(w, "w") ? w : null;
   if (w.children.length !== 1) return w;
   const c = w.children[0];
   if (w.absolute && c.kind !== "frame") {
@@ -642,7 +705,12 @@ function regroup(w) {
         const memberName = (k) => k.name || k.component || k.semanticName || (k.kind === "text" ? (k.src && k.src.tag && k.src.tag !== "#text" ? k.src.tag : "text") : nodeName(k.src || k));
         const names = members.map(memberName);
         const label = names.length > 3 ? `${names.slice(0, 3).join(" + ")} …` : names.join(" + ");
-        nextItems.push({ kind: "frame", synthetic: true, name: label, box: gb, content: { ...gb }, style: { ...(w.layoutFrom || w).style, display: "block", padding: [0, 0, 0, 0], borderWidth: [0, 0, 0, 0], borderStyle: ["none", "none", "none", "none"], backgroundColor: "rgba(0, 0, 0, 0)", boxShadow: "none", overflowX: "visible", overflowY: "visible", opacity: 1, justifyContent: "normal", alignItems: "normal", flexGrow: 0 }, children: members, chain: w.chain || [], forcedMode: L.mode, forcedCounter: L.counter === "BASELINE" ? "MIN" : L.counter });
+        // a group cut out of a flex row is still a flex row: its items shrink to fit, and it
+        // stretches when one of its items does (flex-grow)
+        const fromStyle = (w.layoutFrom || w).style || {};
+        const groupDisplay = /flex/.test(fromStyle.display || "") ? "flex" : "block";
+        const groupGrow = members.some((k) => ((k.style || {}).flexGrow || 0) > 0 || (k.flexGrowFrom || 0) > 0) ? 1 : 0;
+        nextItems.push({ kind: "frame", synthetic: true, name: label, box: gb, content: { ...gb }, style: { ...fromStyle, display: groupDisplay, padding: [0, 0, 0, 0], borderWidth: [0, 0, 0, 0], borderStyle: ["none", "none", "none", "none"], backgroundColor: "rgba(0, 0, 0, 0)", boxShadow: "none", overflowX: "visible", overflowY: "visible", opacity: 1, justifyContent: "normal", alignItems: "normal", flexGrow: groupGrow }, children: members, chain: w.chain || [], forcedMode: L.mode, forcedCounter: L.counter === "BASELINE" ? "MIN" : L.counter });
         if (j < gaps.length) nextGaps.push(gaps[j]);
         i = j + 1;
       } else {
@@ -832,7 +900,7 @@ function fixedSource(c, parent, axis) {
   const pos = (c.style || {}).position;
   if (pos === "fixed") return "position: fixed (an overlay over the screen)";
   if (pos === "sticky" && parent.style && parent.style.position === "fixed") return "position: sticky inside a fixed overlay";
-  if (c.kind === "svg") return c.name === "icon/chevron-down" ? "select arrow (daisyUI)" : "icon size attribute";
+  if (c.kind === "svg") return c.name === "icon/chevron-down" ? "select arrow (daisyUI)" : c.name === "progress-value" ? "progress value (value / max of the progress bar)" : "icon size attribute";
   const cls = fixedClass(c, axis);
   if (cls) return `class ${cls}`;
   const d = (c.style || {}).display;
@@ -878,14 +946,23 @@ function emitText(c, parent, tokens, styles) {
       run.fill = tokens.resolve(rc, c.chain || [], ["text"]);
       differs = true;
     }
+    // a bold or larger part gets a text style of its own, so the whole text stays styled
+    if (run.weight || run.size) {
+      const rs = run.size || size, rw = run.weight || weight;
+      run.textStyle = textStyleName(rs, rw, lineHeight);
+      styles.text.set(run.textStyle, { family: "Noto Sans JP", weight: rw, size: rs, lineHeight, letterSpacing: s.letterSpacing || 0 });
+    }
     if (differs && end > pos) outRuns.push(run);
     pos = end;
   }
   const align = c.alignCenter ? "CENTER" : { center: "CENTER", right: "RIGHT", end: "RIGHT", justify: "JUSTIFIED" }[s.textAlign] || "LEFT";
   const clamp = parseInt(s.lineClamp, 10);
+  const deco = s.textDecoration || (runs[0] && runs[0].textDecoration) || "";
+  // text-overflow: ellipsis on one line (Tailwind truncate) ends with "…" in Figma too
+  const ellipsis = s.textOverflow === "ellipsis" && /nowrap/.test(s.whiteSpace || "");
   const spec = {
     type: "TEXT",
-    name: c.name || characters.replace(/\n/g, " ").slice(0, 24),
+    name: c.name || characters.replace(/\n/g, " ").slice(0, 40),
     w: round2(c.box.w),
     h: round2(c.box.h),
     text: {
@@ -896,10 +973,10 @@ function emitText(c, parent, tokens, styles) {
       lineHeight,
       letterSpacing: s.letterSpacing || 0,
       align,
-      decoration: s.textDecoration && s.textDecoration.includes("underline") ? "UNDERLINE" : "NONE",
+      decoration: /underline/.test(deco) ? "UNDERLINE" : /line-through/.test(deco) ? "STRIKETHROUGH" : "NONE",
       fill: fill || { color: { r: 0, g: 0, b: 0 }, opacity: 1 },
       runs: outRuns,
-      maxLines: clamp > 0 ? clamp : undefined,
+      maxLines: clamp > 0 ? clamp : ellipsis ? 1 : undefined,
     },
     textStyle: styleName,
   };
@@ -935,6 +1012,8 @@ function emitBoxStyle(w, spec, tokens, styles) {
 function emit(w, parent, tokens, styles, ctx) {
   const rel = (b) => (parent ? { x: round2(b.x - parent.box.x), y: round2(b.y - parent.box.y) } : { x: 0, y: 0 });
   const sizing = decideSizing(w, parent);
+  // an empty spacer (w-24 with no content) has no height of its own
+  if (w.kind === "frame" && !w.children.length && sizing.v === "FIXED" && !sizing.sourceH) sizing.sourceH = "empty spacer (no content)";
   const base = { w: round2(w.box.w), h: round2(w.box.h), ...rel(w.box), sizing };
   const src = w.src || w;
   if (src.tag && src.tag !== "#text" && src.tag !== "#value") base.dom = [src.tag, (src.cls || "").trim()].filter(Boolean).join(" .").slice(0, 200);
@@ -955,7 +1034,8 @@ function emit(w, parent, tokens, styles, ctx) {
     return { ...spec, ...base, name: spec.name };
   }
   if (w.kind === "svg") {
-    return { type: "SVG", name: w.name || nodeName(w.src || w), svg: w.svgOverride || w.src.svg, ...base };
+    const svgOpacity = w.src && w.src.style && w.src.style.opacity !== 1 ? { opacity: w.src.style.opacity } : {};
+    return { type: "SVG", name: w.name || nodeName(w.src || w), svg: w.svgOverride || w.src.svg, ...svgOpacity, ...base };
   }
   if (w.kind === "image") {
     const spec = { type: "IMAGE", name: NAMING !== "class" && w.wrapperName && w.wrapperName !== "div" ? w.wrapperName : nodeName(w.src), image: (w.src.src || "").split("/").pop().split("?")[0], scaleMode: w.src.style.objectFit === "contain" ? "FIT" : "FILL", ...base };
@@ -997,6 +1077,14 @@ function emit(w, parent, tokens, styles, ctx) {
     }
   }
   if (w.src) emitBoxStyle(w, spec, tokens, styles);
+  // CSS draws box-shadow around the box even when it has no background; Figma casts it from
+  // the layer's filled area, so a shadowed box gets the background that shows behind it
+  ctx.bgStack = ctx.bgStack || [];
+  const dropShadow = spec.effectStyle || (spec.effects || []).some((e) => e.type === "DROP_SHADOW");
+  if (dropShadow && (!spec.fills || !spec.fills.length)) {
+    spec.fills = [ctx.bgStack[ctx.bgStack.length - 1] || tokens.resolve({ r: 1, g: 1, b: 1, a: 1 }, [], ["bg"])];
+    spec.fillSource = "the background behind it (CSS box-shadow on a transparent box)";
+  }
   if (st.minWidth > 0 && sizing.h === "HUG") spec.minWidth = st.minWidth;
   const L = w.layout;
   if (L) {
@@ -1024,10 +1112,13 @@ function emit(w, parent, tokens, styles, ctx) {
   } else {
     spec.layout = { mode: "NONE" };
   }
+  const opaque = spec.fills && spec.fills.length && spec.fills[0].opacity !== 0 && !spec.fillSource;
+  if (opaque) ctx.bgStack.push(spec.fills[0]);
   for (const c of w.children) {
     if (c.kind === "frame" && !c.src && !c.synthetic) continue;
     spec.children.push(emit(c, w, tokens, styles, ctx));
   }
+  if (opaque) ctx.bgStack.pop();
   if (w.scrollMarker) spec.children.push(w.scrollMarker);
   return spec;
 }

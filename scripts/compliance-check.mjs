@@ -11,9 +11,10 @@
 //   fillInHug      FILL on an axis the parent hugs, with no sibling that sets the size
 //   shadowClip     a drop shadow cut off by a clipping ancestor
 //   unboundColor   a solid fill or stroke not bound to a color variable
-//   noTextStyle    a text layer without a text style
+//   noTextStyle    a text layer without a text style (mixed text needs one on every part)
 //   defaultName    a Figma default layer name (Frame 1, Rectangle 2, ...)
-//   height         a screen frame whose height differs from the page it reproduces
+//   height         a screen frame whose height differs from the page it reproduces (beyond
+//                  a recorded growth for taller Figma text)
 //
 // Usage:
 //   node scripts/compliance-check.mjs [--roots id,id] [--manifest manifest.json] [--json]
@@ -73,7 +74,8 @@ function checkRoot(root, expectHeight) {
       }
     }
     if (n.effects && n.effects.some((e) => e.type === "DROP_SHADOW")) {
-      const reach = Math.max(...n.effects.map((e) => e.radius + Math.abs(e.spread || 0) + Math.max(Math.abs((e.offset || {}).x || 0), Math.abs((e.offset || {}).y || 0))));
+      // only drop shadows reach outside the box; inner shadows stay inside it
+      const reach = Math.max(...n.effects.filter((e) => e.type === "DROP_SHADOW").map((e) => e.radius + Math.abs(e.spread || 0) + Math.max(Math.abs((e.offset || {}).x || 0), Math.abs((e.offset || {}).y || 0))));
       // absolute position of n inside each ancestor
       let x = n.x, y = n.y;
       for (let k = ancestors.length - 1; k >= 0; k--) {
@@ -95,15 +97,15 @@ function checkRoot(root, expectHeight) {
         if (!p.bound && variableHex.has(String(p.color).slice(0, 7).toLowerCase()) && !(n.name || "").startsWith("icon/")) hits.unboundColor.push({ ...ref(n), kind, color: p.color });
       }
     }
-    if (n.type === "TEXT" && (!n.textStyleId || n.textStyleId === "mixed")) hits.noTextStyle.push(ref(n));
+    if (n.type === "TEXT" && (!n.textStyleId || (n.textStyleId === "mixed" && !n.textStyleAllRanges))) hits.noTextStyle.push(ref(n));
     if (DEFAULT_NAME.test(n.name || "")) hits.defaultName.push({ ...ref(n), type: n.type });
   });
   // vector children inside icons carry their own paints; ignore them
   hits.unboundColor = hits.unboundColor.filter((h) => !/^(Vector|path|line|rect|circle|polyline)/i.test(h.name || ""));
   hits.defaultName = hits.defaultName.filter((h) => h.type !== "VECTOR");
-  // a frame grown for Figma's whole-pixel text heights (recorded on the frame) is allowed
-  // up to 0.5% of the page height
-  const grown = /rounds text heights/.test(root.sourceH || "") && root.h > expectHeight && root.h - expectHeight <= expectHeight * 0.005;
+  // a frame grown because Figma's text is taller (whole-pixel line heights or a later Japanese
+  // line break; the reason is recorded on the frame) is allowed up to 3% of the page height
+  const grown = /text is taller|rounds text heights/.test(root.sourceH || "") && root.h > expectHeight && root.h - expectHeight <= expectHeight * 0.03;
   if (expectHeight !== undefined && Math.abs(root.h - expectHeight) > 1 && !grown) hits.height.push({ ...ref(root), h: root.h, expected: expectHeight });
   return hits;
 }

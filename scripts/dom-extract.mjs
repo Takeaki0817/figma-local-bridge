@@ -50,7 +50,7 @@ if (!out || !screensFile) {
 }
 
 // Runs inside the page. Returns { root, docHeight, tokens }.
-function extractInPage({ componentNames, classComponents }) {
+function extractInPage({ componentNames, classComponents, extraCss }) {
   const wanted = new Set(componentNames);
   const vw = window.innerWidth;
 
@@ -71,6 +71,25 @@ function extractInPage({ componentNames, classComponents }) {
       f = f.return;
     }
     return found;
+  }
+
+  // the innermost React component that renders an element (any component, for layer names);
+  // only the outermost element of each component gets the name
+  function reactNameOf(el) {
+    const key = el && fiberKey(el);
+    if (!key) return null;
+    let f = el[key] && el[key].return;
+    while (f && typeof f.type !== "string") {
+      const t = f.elementType || f.type;
+      const name = t && (t.displayName || t.name || (t.type && (t.type.displayName || t.type.name)) || (t.render && t.render.name));
+      if (name) return name;
+      f = f.return;
+    }
+    return null;
+  }
+  function reactRootName(el) {
+    const own = reactNameOf(el);
+    return own && own !== reactNameOf(el.parentElement) ? own : null;
   }
 
   const px = (v) => (v === "normal" || v === "auto" || v === "" ? null : parseFloat(v));
@@ -119,6 +138,7 @@ function extractInPage({ componentNames, classComponents }) {
       textAlign: cs.textAlign,
       textDecoration: cs.textDecorationLine,
       whiteSpace: cs.whiteSpace,
+      textOverflow: cs.textOverflow,
       lineClamp: cs.webkitLineClamp,
       transform: cs.transform,
       objectFit: cs.objectFit,
@@ -227,33 +247,80 @@ function extractInPage({ componentNames, classComponents }) {
     return false;
   }
   function visibleOnPage(r, cs, el) {
-    if (r.width <= 0 || r.height <= 0) return false;
+    if (r.width <= 0) return false;
+    // an empty flex item with no height still takes room in the row (a w-24 spacer)
+    const spacer = el.childElementCount === 0 && !el.textContent.trim() && el.parentElement && /flex/.test(getComputedStyle(el.parentElement).display);
+    if (r.height <= 0 && !spacer) return false;
     if ((r.right <= 0 || r.left >= vw) && !insideScroller(el)) return false;
     if (cs.visibility === "hidden") return false;
     if (parseFloat(cs.opacity) === 0) return false;
     return true;
   }
 
+  // Any CSS color as #rrggbb (or rgba) through a 1x1 canvas, for SVG markup Figma can read.
+  const colorCanvas = document.createElement("canvas");
+  colorCanvas.width = colorCanvas.height = 1;
+  const colorCtx = colorCanvas.getContext("2d", { willReadFrequently: true });
+  const srgb = (col) => {
+    if (!col || col === "none" || col === "transparent") return col;
+    colorCtx.clearRect(0, 0, 1, 1);
+    colorCtx.fillStyle = "#000";
+    colorCtx.fillStyle = col;
+    colorCtx.fillRect(0, 0, 1, 1);
+    const [r, g, b, a] = colorCtx.getImageData(0, 0, 1, 1).data;
+    const hex = "#" + [r, g, b].map((x) => x.toString(16).padStart(2, "0")).join("");
+    return a === 255 ? hex : `rgba(${r}, ${g}, ${b}, ${(a / 255).toFixed(3)})`;
+  };
+
   // Size declarations that apply to an element, from same-origin stylesheets (last wins).
   const sizeRules = [];
-  const collectRules = (list) => {
+  // Tailwind v4 and daisyUI 5 put their rules in @layer blocks and nest them, so look inside
+  // layers, @supports and nested rules too (a nested "&" stands for the parent selector)
+  const collectRules = (list, parentSel) => {
     for (const rule of Array.from(list)) {
       if (rule.type === CSSRule.MEDIA_RULE) {
-        if (window.matchMedia(rule.conditionText || rule.media.mediaText).matches) collectRules(rule.cssRules);
+        if (window.matchMedia(rule.conditionText || rule.media.mediaText).matches) collectRules(rule.cssRules, parentSel);
         continue;
       }
-      if (!rule.style || !rule.selectorText) continue;
-      const decl = {};
-      for (const prop of ["width", "height", "min-width", "max-width", "min-height", "max-height", "flex-basis"]) {
-        const v = rule.style.getPropertyValue(prop);
-        if (v && v !== "auto" && v !== "none") decl[prop] = v;
+      if (rule.type === CSSRule.SUPPORTS_RULE) {
+        if (CSS.supports(rule.conditionText)) collectRules(rule.cssRules, parentSel);
+        continue;
       }
-      if (Object.keys(decl).length) sizeRules.push({ selector: rule.selectorText, decl });
+      const sizeDecl = (style) => {
+        const decl = {};
+        for (const prop of ["width", "height", "min-width", "max-width", "min-height", "max-height", "flex-basis"]) {
+          const v = style.getPropertyValue(prop);
+          if (v && v !== "auto" && v !== "none") decl[prop] = v;
+        }
+        return decl;
+      };
+      if (!rule.selectorText) {
+        // declarations nested in a layer inside a rule (daisyUI 5: .tab { @layer x { height: ... } })
+        if (rule.style && parentSel) {
+          const decl = sizeDecl(rule.style);
+          if (Object.keys(decl).length) sizeRules.push({ selector: parentSel, decl });
+        }
+        if (rule.cssRules) collectRules(rule.cssRules, parentSel);
+        continue;
+      }
+      if (!rule.style) continue;
+      const own = rule.selectorText;
+      const selector = parentSel ? (own.includes("&") ? own.replace(/&/g, `:is(${parentSel})`) : `:is(${parentSel}) ${own}`) : own;
+      const decl = sizeDecl(rule.style);
+      if (Object.keys(decl).length) sizeRules.push({ selector, decl });
+      if (rule.cssRules && rule.cssRules.length) collectRules(rule.cssRules, selector);
     }
   };
+  for (const text of extraCss || []) {
+    try {
+      const sheet = new CSSStyleSheet();
+      sheet.replaceSync(text);
+      collectRules(sheet.cssRules, null);
+    } catch (e) {}
+  }
   for (const sheet of Array.from(document.styleSheets)) {
     try {
-      collectRules(sheet.cssRules);
+      collectRules(sheet.cssRules, null);
     } catch (e) {}
   }
   function declaredSizes(el) {
@@ -278,6 +345,7 @@ function extractInPage({ componentNames, classComponents }) {
       tag,
       cls: typeof el.className === "string" ? el.className : el.getAttribute("class") || "",
       component: componentOf(el),
+      reactName: reactRootName(el),
       box: box(r),
       style: styleOf(cs),
     };
@@ -297,7 +365,13 @@ function extractInPage({ componentNames, classComponents }) {
       const clone = el.cloneNode(true);
       clone.setAttribute("width", String(r.width));
       clone.setAttribute("height", String(r.height));
-      node.svg = clone.outerHTML.replace(/currentColor/g, cs.color);
+      // CSS classes (stroke-red-500, fill-current) override the attributes
+      if (cs.stroke && cs.stroke !== "none") clone.setAttribute("stroke", cs.stroke);
+      if (cs.fill && cs.fill !== "none" && clone.getAttribute("fill") !== "none") clone.setAttribute("fill", cs.fill);
+      // Figma reads only sRGB colors: write oklch()/oklab() and currentColor as hex
+      node.svg = clone.outerHTML
+        .replace(/currentColor/g, srgb(cs.color))
+        .replace(/(?:oklch|oklab|lab|lch|color)\([^)]*\)/g, (c) => srgb(c));
       node.iconName = (node.cls.match(/lucide-([a-z0-9-]+)/g) || []).map((c) => c.replace("lucide-", "")).filter((n) => n !== "icon")[0] || null;
       return node;
     }
@@ -306,11 +380,21 @@ function extractInPage({ componentNames, classComponents }) {
       node.alt = el.alt;
       return node;
     }
+    if (tag === "progress") {
+      // the filled part is drawn outside the DOM (::-webkit-progress-value)
+      node.progress = { value: el.value, max: el.max, position: el.position, color: cs.color };
+      return node;
+    }
     if (tag === "input" || tag === "textarea" || tag === "select") {
       node.inputType = el.type;
       if (tag === "select") {
         const opt = el.options[el.selectedIndex];
         node.value = opt ? opt.text : "";
+      } else if (el.type === "date") {
+        // Chrome (ja) shows a date as 2026/03/01 and an empty one as 年 /月/日
+        node.value = el.value ? el.value.replace(/-/g, "/") : "";
+        node.placeholder = "年 /月/日";
+        node.placeholderColor = cs.color;
       } else {
         node.value = el.value;
         node.placeholder = el.placeholder || "";
@@ -414,6 +498,7 @@ function extractInPage({ componentNames, classComponents }) {
 }
 
 const screens = JSON.parse(await readFile(screensFile, "utf8"));
+const cssCache = new Map();
 await mkdir(out, { recursive: true });
 const browser = await chromium.launch({ executablePath: chromePath, headless: true });
 try {
@@ -443,7 +528,20 @@ try {
           await page.waitForTimeout(300);
         }
       }
-      const data = await page.evaluate(extractInPage, { componentNames: components, classComponents });
+      // stylesheets from another origin (a CDN) cannot be read in the page; fetch their text
+      const crossHrefs = await page.evaluate(() => Array.from(document.styleSheets).filter((sh) => {
+        try {
+          return !sh.cssRules && !!sh.href;
+        } catch (e) {
+          return !!sh.href;
+        }
+      }).map((sh) => sh.href));
+      const extraCss = [];
+      for (const href of crossHrefs) {
+        if (!cssCache.has(href)) cssCache.set(href, await fetch(href).then((r) => (r.ok ? r.text() : "")).catch(() => ""));
+        extraCss.push(cssCache.get(href));
+      }
+      const data = await page.evaluate(extractInPage, { componentNames: components, classComponents, extraCss });
       data.standardViewport = { w: width, h: height };
       data.screen = screen;
       data.naming = screen.naming || null;

@@ -79,7 +79,11 @@ MCPサーバーは、Figmaデザインの読み取り・編集のためのツー
 `scripts/` のスクリプトで、実際の表示を測ってそのまま Figma に起こせます（Playwright の Chromium が必要）。
 
 1. `node scripts/dom-extract.mjs --base http://localhost:5173 --out <dir> --screens screens.json --components <React部品名,...>` — 各画面を 375px / 1366px で開き、要素の箱・計算済みスタイル・文字・画像・SVG と画面写真を保存します。
-2. `node scripts/figma-build.mjs --extract <dir> --screens screens.json --images <public/images> --src <app/src> --out manifest.json --components <部品名,...> [--state-components StatusBadge:Status] [--clean]` — Auto Layout・コンポーネント（画面幅や状態のバリアント）・色変数・テキストスタイル・エフェクトスタイルで組み立てます。各ノードには元の要素と寸法の出典が記録されます。
+2. `node scripts/figma-build.mjs --expect-file <ファイル名> --extract <dir> --screens screens.json --images <public/images> --src <app/src> --out manifest.json --components <部品名,...> [--state-components StatusBadge:Status] [--variant-labels "TodoItem=未完了|完了"] [--clean]` — Auto Layout・コンポーネント（画面幅や状態のバリアント）・色変数・テキストスタイル・エフェクトスタイルで組み立てます。各ノードには元の要素と寸法の出典が記録されます。
+   - `--expect-file` は必須です。プラグインが1つだけ、そのファイルで動いている時にだけ書き込みます（`get_file_info` を全プラグインに問い合わせて確かめます）。
+   - `--variant-labels` は、同じ部品でも構造が違う使われ方（チェック済みのタスクなど）を、使われる数の多い順に「状態」のバリアントにします。
+   - `--layout course` は講座のファイルの形式（コンポーネント枠・スタイルガイド枠・SP/PC の組）で並べます。`--component-labels`、`--components-note`、`--style-guide`、`--ogp` で見出しや中身を指定します。
+   - スクリプトは環境変数 `FIGMA_TARGET_FILE=<ファイル名>` を付けて動かすと、別のファイルで開いているプラグインに命令が届きません（プラグインは宛先が違う命令に応えません）。
 3. `node scripts/figma-export.mjs manifest.json <dir>` と `python3 scripts/visual-diff.py <実画面.png> <Figma.png> <比較.png>` — 実画面と見比べます。
 4. `node scripts/compliance-check.mjs --manifest manifest.json` — 余白10px帯・出典のない固定サイズ・FILLの付け忘れ・縮む親の中のFILL・切れる影・変数の結び忘れ・テキストスタイル・既定のレイヤー名・画面の高さを検査します。
 

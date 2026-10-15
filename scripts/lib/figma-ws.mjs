@@ -5,9 +5,11 @@
 export async function connectFigma({ channel = process.env.FIGMA_CHANNEL || "figma-local-bridge", port = 3055 } = {}) {
   const ws = new WebSocket(`ws://localhost:${port}`);
   const pending = new Map();
+  const gathering = new Map(); // id -> every answer, for callAll
   ws.onmessage = (e) => {
     const json = JSON.parse(e.data);
     const m = json.message;
+    if (m && m.id && gathering.has(m.id) && json.type !== "progress_update" && (m.result !== undefined || m.error)) gathering.get(m.id).push(m);
     if (!m || !m.id || !pending.has(m.id)) return;
     if (json.type === "progress_update") return;
     if (m.result === undefined && !m.error) return;
@@ -20,8 +22,11 @@ export async function connectFigma({ channel = process.env.FIGMA_CHANNEL || "fig
     ws.onopen = resolve;
     ws.onerror = () => reject(new Error("Cannot reach the relay on port " + port));
   });
+  // FIGMA_TARGET_FILE=<file name>: only the plugin running in that file answers
+  const target = process.env.FIGMA_TARGET_FILE;
   const send = (type, command, params, timeout) => {
     const id = crypto.randomUUID();
+    if (target && type !== "join") params = { targetFile: target, ...params };
     const req =
       type === "join"
         ? { id, type: "join", channel: params.channel, message: { id, command: "join", params: { ...params, commandId: id } } }
@@ -39,8 +44,21 @@ export async function connectFigma({ channel = process.env.FIGMA_CHANNEL || "fig
     });
   };
   await send("join", "join", { channel }, 5000);
+  // every plugin on the channel answers a command; collect all answers for a while (used to
+  // make sure exactly one plugin, in the expected file, will receive the writes)
+  const callAll = async (command, params = {}, waitMs = 2500) => {
+    const id = crypto.randomUUID();
+    gathering.set(id, []);
+    // callAll asks every plugin, whatever FIGMA_TARGET_FILE says
+    ws.send(JSON.stringify({ id, type: "message", channel, message: { id, command, params: { ...params, commandId: id } } }));
+    await new Promise((r) => setTimeout(r, waitMs));
+    const answers = gathering.get(id);
+    gathering.delete(id);
+    return answers.map((m) => (m.error ? { error: String(m.error) } : m.result));
+  };
   return {
     call: (command, params = {}, timeout = 60000) => send("message", command, params, timeout),
+    callAll,
     close: () => ws.close(),
   };
 }
