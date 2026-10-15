@@ -142,12 +142,22 @@ const TW_LEADING = { 12: 16, 14: 20, 16: 24, 18: 28, 20: 28, 24: 32, 30: 36, 36:
 const TW_WEIGHT = { 100: "thin", 200: "extralight", 300: "light", 400: "normal", 500: "medium", 600: "semibold", 700: "bold", 800: "extrabold", 900: "black" };
 const LEADING_NAMES = { 1: "none", 1.25: "tight", 1.375: "snug", 1.5: "normal", 1.625: "relaxed", 2: "loose" };
 
-export function textStyleName(size, weight, lineHeight) {
+// letter spacing as Tailwind names it (tracking-widest = 0.1em); text styles with and without
+// it must not share a name, or one overwrites the other
+const TW_TRACKING = { "-0.05": "tighter", "-0.025": "tight", "0.025": "wide", "0.05": "wider", "0.1": "widest" };
+function trackingName(size, letterSpacing) {
+  if (!letterSpacing) return "";
+  const em = round3(letterSpacing / size);
+  if (NAMING === "class") return `/${em}em`;
+  return TW_TRACKING[String(em)] ? `/tracking-${TW_TRACKING[String(em)]}` : `/tracking-[${em}em]`;
+}
+
+export function textStyleName(size, weight, lineHeight, letterSpacing = 0) {
   if (NAMING === "class") {
     // plain CSS: font-size / weight / line-height as written in the stylesheet
     const w = TW_WEIGHT[weight] || String(weight);
     const lh = lineHeight === null ? "normal" : String(round2(lineHeight / size));
-    return `${round2(size)}px/${w}/${lh}`;
+    return `${round2(size)}px/${w}/${lh}${trackingName(size, letterSpacing)}`;
   }
   const sizeName = TW_SIZE[size] ? `text-${TW_SIZE[size]}` : `text-[${round2(size)}px]`;
   const w = TW_WEIGHT[weight] || String(weight);
@@ -157,7 +167,7 @@ export function textStyleName(size, weight, lineHeight) {
     const ratio = round3(lineHeight / size);
     lead = LEADING_NAMES[ratio] ? `/leading-${LEADING_NAMES[ratio]}` : `/leading-[${round2(lineHeight)}px]`;
   }
-  return `${sizeName}/${w}${lead}`;
+  return `${sizeName}/${w}${lead}${trackingName(size, letterSpacing)}`;
 }
 
 // ---------- box shadows ----------
@@ -242,6 +252,8 @@ function nodeName(n) {
   for (const d of DAISY_NAMES) if (cls.includes(d)) return d;
   if (n.tag === "svg") return `icon/${n.iconName || "icon"}`;
   if (n.tag === "img") return (n.src || "").split("/").pop().replace(/\.[a-z]+(\?.*)?$/, "") || "image";
+  // an element with an id is named by it (section#items), as the page's author named it
+  if (n.id) return `${n.tag}#${n.id}`;
   if (SEMANTIC.has(n.tag)) return n.tag;
   if (n.tag === "span") return "span";
   return "div";
@@ -916,8 +928,20 @@ function fontWeight(v) {
   return Math.round((v || 400) / 100) * 100;
 }
 
+// The font a text is set in: the first family the page names, unless it is a generic or
+// system name (then the course's default, Noto Sans JP).
+const DEFAULT_FAMILY = "Noto Sans JP";
+function familyOf(fontFamily) {
+  const first = String(fontFamily || "").split(",")[0].trim().replace(/^["']|["']$/g, "");
+  if (!first || /^(ui-|system-ui|-apple-system|BlinkMacSystemFont|sans-serif|serif|monospace|cursive|fantasy)/i.test(first)) return DEFAULT_FAMILY;
+  return first;
+}
+
 function emitText(c, parent, tokens, styles) {
   const s = c.style;
+  const family = familyOf(s.fontFamily);
+  // a second typeface gets its own group of text styles (Zen Old Mincho/text-3xl/bold)
+  const withFamily = (name) => (family === DEFAULT_FAMILY ? name : `${family}/${name}`);
   const runs = c.runs || [];
   const characters = textCharacters(runs);
   const baseColor = parseColor(runs[0] && runs[0].color ? runs[0].color : s.color);
@@ -925,8 +949,8 @@ function emitText(c, parent, tokens, styles) {
   const weight = fontWeight(runs[0] ? runs[0].fontWeight : s.fontWeight);
   const size = runs[0] ? runs[0].fontSize : s.fontSize;
   const lineHeight = s.lineHeight;
-  const styleName = textStyleName(size, weight, lineHeight);
-  styles.text.set(styleName, { family: "Noto Sans JP", weight, size, lineHeight, letterSpacing: s.letterSpacing || 0 });
+  const styleName = withFamily(textStyleName(size, weight, lineHeight, s.letterSpacing || 0));
+  styles.text.set(styleName, { family, weight, size, lineHeight, letterSpacing: s.letterSpacing || 0 });
   const outRuns = [];
   let pos = 0;
   for (const r of runs) {
@@ -949,8 +973,8 @@ function emitText(c, parent, tokens, styles) {
     // a bold or larger part gets a text style of its own, so the whole text stays styled
     if (run.weight || run.size) {
       const rs = run.size || size, rw = run.weight || weight;
-      run.textStyle = textStyleName(rs, rw, lineHeight);
-      styles.text.set(run.textStyle, { family: "Noto Sans JP", weight: rw, size: rs, lineHeight, letterSpacing: s.letterSpacing || 0 });
+      run.textStyle = withFamily(textStyleName(rs, rw, lineHeight, s.letterSpacing || 0));
+      styles.text.set(run.textStyle, { family, weight: rw, size: rs, lineHeight, letterSpacing: s.letterSpacing || 0 });
     }
     if (differs && end > pos) outRuns.push(run);
     pos = end;
@@ -967,7 +991,7 @@ function emitText(c, parent, tokens, styles) {
     h: round2(c.box.h),
     text: {
       characters,
-      family: "Noto Sans JP",
+      family,
       weight,
       size,
       lineHeight,

@@ -311,10 +311,12 @@ function extractInPage({ componentNames, classComponents, extraCss }) {
       if (rule.cssRules && rule.cssRules.length) collectRules(rule.cssRules, selector);
     }
   };
+  const extraSheets = [];
   for (const text of extraCss || []) {
     try {
       const sheet = new CSSStyleSheet();
       sheet.replaceSync(text);
+      extraSheets.push(sheet);
       collectRules(sheet.cssRules, null);
     } catch (e) {}
   }
@@ -344,6 +346,7 @@ function extractInPage({ componentNames, classComponents, extraCss }) {
     const node = {
       tag,
       cls: typeof el.className === "string" ? el.className : el.getAttribute("class") || "",
+      id: el.id || undefined,
       component: componentOf(el),
       reactName: reactRootName(el),
       box: box(r),
@@ -457,7 +460,8 @@ function extractInPage({ componentNames, classComponents, extraCss }) {
   const rootCs = getComputedStyle(document.documentElement);
   const probe = document.createElement("div");
   document.body.appendChild(probe);
-  for (const sheet of Array.from(document.styleSheets)) {
+  // color tokens also come from stylesheets fetched from another origin (a CDN daisyUI)
+  for (const sheet of [...Array.from(document.styleSheets), ...extraSheets]) {
     let rules;
     try {
       rules = sheet.cssRules;
