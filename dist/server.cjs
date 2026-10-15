@@ -28,6 +28,7 @@ var import_stdio = require("@modelcontextprotocol/sdk/server/stdio.js");
 var import_zod = require("zod");
 var import_ws = __toESM(require("ws"), 1);
 var import_uuid = require("uuid");
+var import_fs = require("fs");
 var logger = {
   info: (message) => process.stderr.write(`[INFO] ${message}
 `),
@@ -703,16 +704,21 @@ server.tool(
   {
     nodeId: import_zod.z.string().describe("The ID of the node to export"),
     format: import_zod.z.enum(["PNG", "JPG", "SVG", "PDF"]).optional().describe("Export format"),
-    scale: import_zod.z.number().positive().optional().describe("Export scale")
+    scale: import_zod.z.number().positive().optional().describe("Export scale"),
+    outputPath: import_zod.z.string().optional().describe("Absolute file path. When given, the image is written there and only the path is returned (keeps large images out of the conversation).")
   },
-  async ({ nodeId, format, scale }) => {
+  async ({ nodeId, format, scale, outputPath }) => {
     try {
       const result = await sendCommandToFigma("export_node_as_image", {
         nodeId,
         format: format || "PNG",
         scale: scale || 1
-      });
+      }, 12e4);
       const typedResult = result;
+      if (outputPath) {
+        (0, import_fs.writeFileSync)(outputPath, Buffer.from(typedResult.imageData, "base64"));
+        return { content: [{ type: "text", text: `Saved ${typedResult.mimeType || "image"} to ${outputPath}` }] };
+      }
       return {
         content: [
           {
@@ -731,6 +737,110 @@ server.tool(
           }
         ]
       };
+    }
+  }
+);
+var textResult = (text) => ({ content: [{ type: "text", text }] });
+var errorResult = (what, error) => textResult(`Error ${what}: ${error instanceof Error ? error.message : String(error)}`);
+server.tool(
+  "dump_tree",
+  "Read the real layout of a node (or the current page when nodeId is omitted): auto-layout direction, padding, gap, sizing, fills with variable bindings, effects, text styles, and the source notes recorded by figma-build (dom, sourceW, sourceH, sourcePad). Large: pass outputPath to write JSON to a file instead.",
+  {
+    nodeId: import_zod.z.string().optional().describe("Node ID; omit for the current page"),
+    maxDepth: import_zod.z.number().int().positive().optional().describe("Depth limit (default 50)"),
+    outputPath: import_zod.z.string().optional().describe("Absolute path to write the JSON to")
+  },
+  async ({ nodeId, maxDepth, outputPath }) => {
+    try {
+      const result = await sendCommandToFigma("dump_tree", { nodeId, maxDepth: maxDepth || 50 }, 12e4);
+      if (outputPath) {
+        (0, import_fs.writeFileSync)(outputPath, JSON.stringify(result));
+        return textResult(`Saved the tree of ${result.name} to ${outputPath}`);
+      }
+      return textResult(JSON.stringify(result));
+    } catch (error) {
+      return errorResult("dumping tree", error);
+    }
+  }
+);
+server.tool(
+  "set_clips_content",
+  "Turn 'clip content' on or off for a frame. Keep it off on frames that wrap shadowed children, or the shadows are cut.",
+  {
+    nodeId: import_zod.z.string().describe("Frame ID"),
+    clipsContent: import_zod.z.boolean().describe("true to clip children to the frame")
+  },
+  async ({ nodeId, clipsContent }) => {
+    try {
+      const result = await sendCommandToFigma("set_clips_content", { nodeId, clipsContent });
+      return textResult(JSON.stringify(result));
+    } catch (error) {
+      return errorResult("setting clipsContent", error);
+    }
+  }
+);
+server.tool(
+  "rename_node",
+  "Rename a node (layer).",
+  { nodeId: import_zod.z.string().describe("Node ID"), name: import_zod.z.string().describe("New name") },
+  async ({ nodeId, name }) => {
+    try {
+      return textResult(JSON.stringify(await sendCommandToFigma("rename_node", { nodeId, name })));
+    } catch (error) {
+      return errorResult("renaming node", error);
+    }
+  }
+);
+server.tool(
+  "ensure_pages",
+  "Make sure pages with these names exist (a fresh file's empty 'Page 1' is renamed to the first). Returns name -> page ID.",
+  { pages: import_zod.z.array(import_zod.z.string()).describe("Page names, e.g. ['Design', 'Components']") },
+  async ({ pages }) => {
+    try {
+      return textResult(JSON.stringify(await sendCommandToFigma("ensure_pages", { pages })));
+    } catch (error) {
+      return errorResult("ensuring pages", error);
+    }
+  }
+);
+server.tool(
+  "set_current_page",
+  "Switch the current page (new nodes are created on it).",
+  { pageId: import_zod.z.string().describe("Page ID") },
+  async ({ pageId }) => {
+    try {
+      return textResult(JSON.stringify(await sendCommandToFigma("set_current_page", { pageId })));
+    } catch (error) {
+      return errorResult("switching page", error);
+    }
+  }
+);
+server.tool(
+  "move_to_page",
+  "Move a top-level node to another page, optionally to x/y.",
+  {
+    nodeId: import_zod.z.string().describe("Node ID"),
+    pageId: import_zod.z.string().describe("Destination page ID"),
+    x: import_zod.z.number().optional(),
+    y: import_zod.z.number().optional()
+  },
+  async ({ nodeId, pageId, x, y }) => {
+    try {
+      return textResult(JSON.stringify(await sendCommandToFigma("move_to_page", { nodeId, pageId, x, y })));
+    } catch (error) {
+      return errorResult("moving node", error);
+    }
+  }
+);
+server.tool(
+  "list_fonts",
+  "List the installed styles of a font family (e.g. 'Noto Sans JP').",
+  { family: import_zod.z.string().optional().describe("Font family; omit for all") },
+  async ({ family }) => {
+    try {
+      return textResult(JSON.stringify(await sendCommandToFigma("list_fonts", { family })));
+    } catch (error) {
+      return errorResult("listing fonts", error);
     }
   }
 );

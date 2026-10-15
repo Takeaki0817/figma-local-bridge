@@ -5,6 +5,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import WebSocket from "ws";
 import { v4 as uuidv4 } from "uuid";
+import { writeFileSync } from "fs";
 
 // Define TypeScript interfaces for Figma responses
 interface FigmaResponse {
@@ -862,15 +863,23 @@ server.tool(
       .optional()
       .describe("Export format"),
     scale: z.number().positive().optional().describe("Export scale"),
+    outputPath: z
+      .string()
+      .optional()
+      .describe("Absolute file path. When given, the image is written there and only the path is returned (keeps large images out of the conversation)."),
   },
-  async ({ nodeId, format, scale }: any) => {
+  async ({ nodeId, format, scale, outputPath }: any) => {
     try {
       const result = await sendCommandToFigma("export_node_as_image", {
         nodeId,
         format: format || "PNG",
         scale: scale || 1,
-      });
+      }, 120000);
       const typedResult = result as { imageData: string; mimeType: string };
+      if (outputPath) {
+        writeFileSync(outputPath, Buffer.from(typedResult.imageData, "base64"));
+        return { content: [{ type: "text", text: `Saved ${typedResult.mimeType || "image"} to ${outputPath}` }] };
+      }
 
       return {
         content: [
@@ -891,6 +900,120 @@ server.tool(
           },
         ],
       };
+    }
+  }
+);
+
+// ---- Figma Local Bridge additions: structure dump, pages, names, clipping ----
+const textResult = (text: string) => ({ content: [{ type: "text" as const, text }] });
+const errorResult = (what: string, error: unknown) =>
+  textResult(`Error ${what}: ${error instanceof Error ? error.message : String(error)}`);
+
+server.tool(
+  "dump_tree",
+  "Read the real layout of a node (or the current page when nodeId is omitted): auto-layout direction, padding, gap, sizing, fills with variable bindings, effects, text styles, and the source notes recorded by figma-build (dom, sourceW, sourceH, sourcePad). Large: pass outputPath to write JSON to a file instead.",
+  {
+    nodeId: z.string().optional().describe("Node ID; omit for the current page"),
+    maxDepth: z.number().int().positive().optional().describe("Depth limit (default 50)"),
+    outputPath: z.string().optional().describe("Absolute path to write the JSON to"),
+  },
+  async ({ nodeId, maxDepth, outputPath }: any) => {
+    try {
+      const result = await sendCommandToFigma("dump_tree", { nodeId, maxDepth: maxDepth || 50 }, 120000);
+      if (outputPath) {
+        writeFileSync(outputPath, JSON.stringify(result));
+        return textResult(`Saved the tree of ${(result as any).name} to ${outputPath}`);
+      }
+      return textResult(JSON.stringify(result));
+    } catch (error) {
+      return errorResult("dumping tree", error);
+    }
+  }
+);
+
+server.tool(
+  "set_clips_content",
+  "Turn 'clip content' on or off for a frame. Keep it off on frames that wrap shadowed children, or the shadows are cut.",
+  {
+    nodeId: z.string().describe("Frame ID"),
+    clipsContent: z.boolean().describe("true to clip children to the frame"),
+  },
+  async ({ nodeId, clipsContent }: any) => {
+    try {
+      const result = await sendCommandToFigma("set_clips_content", { nodeId, clipsContent });
+      return textResult(JSON.stringify(result));
+    } catch (error) {
+      return errorResult("setting clipsContent", error);
+    }
+  }
+);
+
+server.tool(
+  "rename_node",
+  "Rename a node (layer).",
+  { nodeId: z.string().describe("Node ID"), name: z.string().describe("New name") },
+  async ({ nodeId, name }: any) => {
+    try {
+      return textResult(JSON.stringify(await sendCommandToFigma("rename_node", { nodeId, name })));
+    } catch (error) {
+      return errorResult("renaming node", error);
+    }
+  }
+);
+
+server.tool(
+  "ensure_pages",
+  "Make sure pages with these names exist (a fresh file's empty 'Page 1' is renamed to the first). Returns name -> page ID.",
+  { pages: z.array(z.string()).describe("Page names, e.g. ['Design', 'Components']") },
+  async ({ pages }: any) => {
+    try {
+      return textResult(JSON.stringify(await sendCommandToFigma("ensure_pages", { pages })));
+    } catch (error) {
+      return errorResult("ensuring pages", error);
+    }
+  }
+);
+
+server.tool(
+  "set_current_page",
+  "Switch the current page (new nodes are created on it).",
+  { pageId: z.string().describe("Page ID") },
+  async ({ pageId }: any) => {
+    try {
+      return textResult(JSON.stringify(await sendCommandToFigma("set_current_page", { pageId })));
+    } catch (error) {
+      return errorResult("switching page", error);
+    }
+  }
+);
+
+server.tool(
+  "move_to_page",
+  "Move a top-level node to another page, optionally to x/y.",
+  {
+    nodeId: z.string().describe("Node ID"),
+    pageId: z.string().describe("Destination page ID"),
+    x: z.number().optional(),
+    y: z.number().optional(),
+  },
+  async ({ nodeId, pageId, x, y }: any) => {
+    try {
+      return textResult(JSON.stringify(await sendCommandToFigma("move_to_page", { nodeId, pageId, x, y })));
+    } catch (error) {
+      return errorResult("moving node", error);
+    }
+  }
+);
+
+server.tool(
+  "list_fonts",
+  "List the installed styles of a font family (e.g. 'Noto Sans JP').",
+  { family: z.string().optional().describe("Font family; omit for all") },
+  async ({ family }: any) => {
+    try {
+      return textResult(JSON.stringify(await sendCommandToFigma("list_fonts", { family })));
+    } catch (error) {
+      return errorResult("listing fonts", error);
     }
   }
 );
@@ -3152,6 +3275,18 @@ This detailed process ensures you correctly interpret the reaction data, prepare
 
 // Define command types and parameters
 type FigmaCommand =
+  | "list_fonts"
+  | "ensure_pages"
+  | "set_current_page"
+  | "ensure_tokens"
+  | "build_tree"
+  | "combine_variants"
+  | "dump_tree"
+  | "rename_node"
+  | "move_to_page"
+  | "clear_page"
+  | "rename_document"
+  | "set_clips_content"
   | "get_document_info"
   | "get_selection"
   | "get_node_info"

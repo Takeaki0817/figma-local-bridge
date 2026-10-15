@@ -71,9 +71,11 @@ claude mcp add TalkToFigma -- bunx cursor-talk-to-figma-mcp@latest
 
 ## Agent Notes
 
+- Follow `.claude/skills/talk-to-figma-design/SKILL.md` for every Figma task; it is the single source for connection, building and acceptance rules
 - Always call `join_channel` before issuing any Figma commands
-- Call `get_document_info` first to understand the design structure
-- Use `read_my_design` or `get_selection` before making modifications
+- Before writing, confirm the target file by reading only the top-level names of the current page (`dump_tree` with `maxDepth: 1`); do not read the whole document (`get_document_info`, `read_my_design`) to "understand the structure"
+- If a command times out, stop and report instead of retrying or skipping ahead: the plugin window is closed or another tab is in front, and every later command would fail silently
+- For screens that exist as running code, use the scripts in `scripts/` (`dom-extract.mjs` → `figma-build.mjs` → `compliance-check.mjs`) instead of placing nodes by hand
 - Batch operations (`set_multiple_text_contents`, `delete_multiple_nodes`, `set_multiple_annotations`) are preferred over repeated single-node calls for performance
 - All MCP tool parameters are Zod-validated; invalid inputs return structured errors
 - The plugin and relay must both be running before any tool calls succeed

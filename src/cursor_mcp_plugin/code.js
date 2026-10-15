@@ -275,6 +275,32 @@ async function handleCommand(command, params) {
       return await createComponentFromNode(params);
     case "create_component":
       return await createComponent(params);
+    case "list_fonts":
+      return await listFonts(params);
+    case "ensure_pages":
+      return await ensurePages(params);
+    case "set_current_page":
+      return await setCurrentPageById(params);
+    case "list_pages":
+      return await listPages();
+    case "ensure_tokens":
+      return await ensureTokens(params);
+    case "build_tree":
+      return await buildTree(params);
+    case "combine_variants":
+      return await combineVariants(params);
+    case "dump_tree":
+      return await dumpTree(params);
+    case "rename_node":
+      return await renameNode(params);
+    case "move_to_page":
+      return await moveToPage(params);
+    case "clear_page":
+      return await clearPage(params);
+    case "rename_document":
+      return await renameDocument(params);
+    case "set_component_description":
+      return await setComponentDescription(params);
     default:
       throw new Error(`Unknown command: ${command}`);
   }
@@ -795,10 +821,10 @@ async function createFrame(params) {
     strokeWeight,
     layoutMode = "NONE",
     layoutWrap = "NO_WRAP",
-    paddingTop = 10,
-    paddingRight = 10,
-    paddingBottom = 10,
-    paddingLeft = 10,
+    paddingTop = 0,
+    paddingRight = 0,
+    paddingBottom = 0,
+    paddingLeft = 0,
     primaryAxisAlignItems = "MIN",
     counterAxisAlignItems = "MIN",
     layoutSizingHorizontal = "FIXED",
@@ -844,7 +870,7 @@ async function createFrame(params) {
         g: parseFloat(fillColor.g) || 0,
         b: parseFloat(fillColor.b) || 0,
       },
-      opacity: parseFloat(fillColor.a) || 1,
+      opacity: fillColor.a === undefined || fillColor.a === null ? 1 : parseFloat(fillColor.a),
     };
     frame.fills = [paintStyle];
   }
@@ -858,7 +884,7 @@ async function createFrame(params) {
         g: parseFloat(strokeColor.g) || 0,
         b: parseFloat(strokeColor.b) || 0,
       },
-      opacity: parseFloat(strokeColor.a) || 1,
+      opacity: strokeColor.a === undefined || strokeColor.a === null ? 1 : parseFloat(strokeColor.a),
     };
     frame.strokes = [strokeStyle];
   }
@@ -960,7 +986,7 @@ async function createText(params) {
       g: parseFloat(fontColor.g) || 0,
       b: parseFloat(fontColor.b) || 0,
     },
-    opacity: parseFloat(fontColor.a) || 1,
+    opacity: fontColor.a === undefined || fontColor.a === null ? 1 : parseFloat(fontColor.a),
   };
   textNode.fills = [paintStyle];
 
@@ -4822,10 +4848,10 @@ async function createComponent(params) {
     strokeWeight,
     layoutMode = "NONE",
     layoutWrap = "NO_WRAP",
-    paddingTop = 10,
-    paddingRight = 10,
-    paddingBottom = 10,
-    paddingLeft = 10,
+    paddingTop = 0,
+    paddingRight = 0,
+    paddingBottom = 0,
+    paddingLeft = 0,
     primaryAxisAlignItems = "MIN",
     counterAxisAlignItems = "MIN",
     layoutSizingHorizontal = "FIXED",
@@ -4862,7 +4888,7 @@ async function createComponent(params) {
           g: parseFloat(fillColor.g) || 0,
           b: parseFloat(fillColor.b) || 0,
         },
-        opacity: parseFloat(fillColor.a) || 1,
+        opacity: fillColor.a === undefined || fillColor.a === null ? 1 : parseFloat(fillColor.a),
       },
     ];
   }
@@ -4876,7 +4902,7 @@ async function createComponent(params) {
           g: parseFloat(strokeColor.g) || 0,
           b: parseFloat(strokeColor.b) || 0,
         },
-        opacity: parseFloat(strokeColor.a) || 1,
+        opacity: strokeColor.a === undefined || strokeColor.a === null ? 1 : parseFloat(strokeColor.a),
       },
     ];
   }
@@ -4909,4 +4935,578 @@ async function createComponent(params) {
     layoutMode: component.layoutMode,
     parentId: component.parent ? component.parent.id : undefined,
   };
+}
+
+// ===== Spec builder: pages, design tokens, whole-tree build, inspection =====
+// Used by scripts/dom-to-figma.mjs. A spec node is plain JSON:
+// { type: FRAME|COMPONENT|TEXT|IMAGE|SVG|INSTANCE, name, w, h, x, y, ... , children }
+// Every auto-layout frame states all four paddings and itemSpacing explicitly.
+
+const specCache = { fonts: new Set(), variables: new Map(), images: new Map() };
+
+const WEIGHT_STYLE = {
+  100: "Thin", 200: "ExtraLight", 300: "Light", 400: "Regular", 500: "Medium",
+  600: "SemiBold", 700: "Bold", 800: "ExtraBold", 900: "Black",
+};
+
+const STYLE_WEIGHT = { Thin: 100, ExtraLight: 200, Light: 300, Regular: 400, Medium: 500, SemiBold: 600, Bold: 700, ExtraBold: 800, Black: 900 };
+
+// Pick the installed style the browser would use: the exact weight, else for weights above
+// 500 the next heavier one, otherwise the next lighter one (CSS font matching).
+async function specFont(family, weight) {
+  if (!specCache.styles) specCache.styles = new Map();
+  if (!specCache.styles.has(family)) {
+    const all = await figma.listAvailableFontsAsync();
+    specCache.styles.set(family, all.filter((f) => f.fontName.family === family).map((f) => f.fontName.style));
+  }
+  const avail = specCache.styles.get(family).filter((st) => STYLE_WEIGHT[st]);
+  let style = WEIGHT_STYLE[weight] || "Regular";
+  if (!avail.includes(style) && avail.length) {
+    const ws = avail.map((st) => STYLE_WEIGHT[st]).sort((a, b) => a - b);
+    const heavier = ws.filter((x) => x > weight);
+    const lighter = ws.filter((x) => x < weight).reverse();
+    const pickW = weight > 500 ? heavier[0] || lighter[0] : lighter[0] || heavier[0];
+    style = Object.keys(STYLE_WEIGHT).find((k) => STYLE_WEIGHT[k] === pickW && avail.includes(k));
+  }
+  const key = `${family}|${style}`;
+  if (!specCache.fonts.has(key)) {
+    await figma.loadFontAsync({ family, style });
+    specCache.fonts.add(key);
+  }
+  return { family, style };
+}
+
+async function listFonts(params) {
+  const { family } = params || {};
+  const all = await figma.listAvailableFontsAsync();
+  return all
+    .filter((f) => !family || f.fontName.family === family)
+    .map((f) => f.fontName.family + " / " + f.fontName.style);
+}
+
+async function ensurePages(params) {
+  const { pages = [] } = params || {};
+  await figma.loadAllPagesAsync();
+  const result = {};
+  const existing = figma.root.children;
+  // A fresh file has one empty "Page 1": reuse it for the first requested page.
+  if (existing.length === 1 && existing[0].children.length === 0 && pages.length && !existing.find((p) => p.name === pages[0])) {
+    existing[0].name = pages[0];
+  }
+  for (const name of pages) {
+    let page = figma.root.children.find((p) => p.name === name);
+    if (!page) {
+      page = figma.createPage();
+      page.name = name;
+    }
+    result[name] = page.id;
+  }
+  return result;
+}
+
+async function listPages() {
+  return figma.root.children.map((p) => ({ id: p.id, name: p.name }));
+}
+
+async function setCurrentPageById(params) {
+  const page = await figma.getNodeByIdAsync(params.pageId);
+  if (!page || page.type !== "PAGE") throw new Error("Not a page: " + params.pageId);
+  await figma.setCurrentPageAsync(page);
+  return { id: page.id, name: page.name };
+}
+
+function specPaint(fill, variablesByName) {
+  if (fill.type === "IMAGE") {
+    return { type: "IMAGE", imageHash: fill.imageHash, scaleMode: fill.scaleMode || "FILL" };
+  }
+  const paint = {
+    type: "SOLID",
+    color: { r: fill.color.r, g: fill.color.g, b: fill.color.b },
+    opacity: fill.opacity === undefined ? 1 : fill.opacity,
+  };
+  return paint;
+}
+
+async function boundPaint(fill, tokenIds) {
+  let paint = specPaint(fill);
+  if (fill.variable && tokenIds && tokenIds.variables && tokenIds.variables[fill.variable]) {
+    const id = tokenIds.variables[fill.variable];
+    let v = specCache.variables.get(id);
+    if (!v) {
+      v = await figma.variables.getVariableByIdAsync(id);
+      specCache.variables.set(id, v);
+    }
+    // the variable carries the alpha (see dom-to-figma.mjs TokenRegistry.resolve)
+    if (v) paint = figma.variables.setBoundVariableForPaint(Object.assign({}, paint, { opacity: 1 }), "color", v);
+  }
+  return paint;
+}
+
+async function ensureTokens(params) {
+  const { collection = "Colors", mode = "Light", colors = {}, textStyles = {}, effectStyles = {} } = params || {};
+  const out = { variables: {}, textStyles: {}, effectStyles: {} };
+
+  const collections = await figma.variables.getLocalVariableCollectionsAsync();
+  let col = collections.find((c) => c.name === collection);
+  if (!col) {
+    col = figma.variables.createVariableCollection(collection);
+    col.renameMode(col.modes[0].modeId, mode);
+  }
+  const modeId = col.modes[0].modeId;
+  const vars = await figma.variables.getLocalVariablesAsync("COLOR");
+  for (const [name, c] of Object.entries(colors)) {
+    let v = vars.find((x) => x.name === name && x.variableCollectionId === col.id);
+    if (!v) v = figma.variables.createVariable(name, col, "COLOR");
+    v.setValueForMode(modeId, { r: c.r, g: c.g, b: c.b, a: c.a === undefined ? 1 : c.a });
+    v.scopes = c.scopes || ["ALL_FILLS", "STROKE_COLOR", "EFFECT_COLOR"];
+    if (c.description) v.description = c.description;
+    out.variables[name] = v.id;
+  }
+
+  const localText = await figma.getLocalTextStylesAsync();
+  for (const [name, t] of Object.entries(textStyles)) {
+    const fontName = await specFont(t.family, t.weight);
+    let st = localText.find((x) => x.name === name);
+    if (!st) st = figma.createTextStyle();
+    st.name = name;
+    st.fontName = fontName;
+    st.fontSize = t.size;
+    st.lineHeight = t.lineHeight ? { unit: "PIXELS", value: t.lineHeight } : { unit: "AUTO" };
+    st.letterSpacing = { unit: "PIXELS", value: t.letterSpacing || 0 };
+    if (t.description) st.description = t.description;
+    out.textStyles[name] = st.id;
+  }
+
+  const localEffects = await figma.getLocalEffectStylesAsync();
+  for (const [name, effects] of Object.entries(effectStyles)) {
+    let st = localEffects.find((x) => x.name === name);
+    if (!st) st = figma.createEffectStyle();
+    st.name = name;
+    st.effects = effects.map(specEffect);
+    out.effectStyles[name] = st.id;
+  }
+  return out;
+}
+
+function specEffect(e) {
+  const out = {
+    type: e.type || "DROP_SHADOW",
+    color: { r: e.color.r, g: e.color.g, b: e.color.b, a: e.color.a },
+    offset: { x: e.offset.x, y: e.offset.y },
+    radius: e.radius,
+    spread: e.spread || 0,
+    visible: true,
+    blendMode: "NORMAL",
+  };
+  // only drop shadows accept showShadowBehindNode
+  if (out.type === "DROP_SHADOW") out.showShadowBehindNode = false;
+  return out;
+}
+
+// Remove every top-level node of a page. The caller passes the page name as a guard so a
+// wrong page id cannot wipe another page.
+async function clearPage(params) {
+  const { pageId, expectName } = params || {};
+  const page = await figma.getNodeByIdAsync(pageId);
+  if (!page || page.type !== "PAGE") throw new Error("Not a page: " + pageId);
+  if (page.name !== expectName) throw new Error(`Page name mismatch: ${page.name} != ${expectName}`);
+  await page.loadAsync();
+  const n = page.children.length;
+  for (const child of page.children.slice()) child.remove();
+  return { pageId, removed: n };
+}
+
+async function applyBoxStyle(node, spec, tokenIds) {
+  if ("fills" in node && spec.type !== "IMAGE" && spec.type !== "SVG") {
+    const fills = [];
+    for (const f of spec.fills || []) fills.push(await boundPaint(f, tokenIds));
+    node.fills = fills;
+  }
+  if (spec.strokes && spec.strokes.paints && spec.strokes.paints.length) {
+    const paints = [];
+    for (const f of spec.strokes.paints) paints.push(await boundPaint(f, tokenIds));
+    node.strokes = paints;
+    node.strokeAlign = spec.strokes.align || "INSIDE";
+    const [t, r, b, l] = spec.strokes.weights;
+    if (t === r && r === b && b === l) {
+      node.strokeWeight = t;
+    } else if ("strokeTopWeight" in node) {
+      node.strokeTopWeight = t;
+      node.strokeRightWeight = r;
+      node.strokeBottomWeight = b;
+      node.strokeLeftWeight = l;
+    } else {
+      node.strokeWeight = Math.max(t, r, b, l);
+    }
+  }
+  if (spec.radius) {
+    const [tl, tr, br, bl] = spec.radius;
+    if (tl === tr && tr === br && br === bl) node.cornerRadius = tl;
+    else {
+      node.topLeftRadius = tl;
+      node.topRightRadius = tr;
+      node.bottomRightRadius = br;
+      node.bottomLeftRadius = bl;
+    }
+  }
+  if (spec.effectStyle && tokenIds && tokenIds.effectStyles && tokenIds.effectStyles[spec.effectStyle]) {
+    await node.setEffectStyleIdAsync(tokenIds.effectStyles[spec.effectStyle]);
+  } else if (spec.effects && spec.effects.length) {
+    node.effects = spec.effects.map(specEffect);
+  }
+  if (spec.opacity !== undefined && spec.opacity !== 1) node.opacity = spec.opacity;
+}
+
+function placeInParent(node, spec, parent) {
+  const parentIsAuto = parent && "layoutMode" in parent && parent.layoutMode !== "NONE";
+  if (parentIsAuto && spec.absolute) {
+    node.layoutPositioning = "ABSOLUTE";
+  }
+  if (!parentIsAuto || spec.absolute) {
+    node.x = spec.x || 0;
+    node.y = spec.y || 0;
+    if (spec.constraints && "constraints" in node) node.constraints = spec.constraints;
+  }
+  return parentIsAuto && !spec.absolute;
+}
+
+function applySizing(node, spec, inAutoParent) {
+  const sz = spec.sizing || {};
+  const selfAuto = "layoutMode" in node && node.layoutMode !== "NONE";
+  const isText = node.type === "TEXT";
+  const pick = (v) => {
+    if (v === "FILL" && !inAutoParent) return "FIXED";
+    if (v === "HUG" && !selfAuto && !isText) return "FIXED";
+    return v || "FIXED";
+  };
+  const h = pick(sz.h);
+  const v = pick(sz.v);
+  if (isText && h === "HUG") {
+    node.textAutoResize = "WIDTH_AND_HEIGHT";
+    return;
+  }
+  if (inAutoParent || selfAuto) {
+    try {
+      node.layoutSizingHorizontal = h;
+    } catch (e) {}
+    try {
+      node.layoutSizingVertical = isText ? (v === "FILL" ? "FILL" : "HUG") : v;
+    } catch (e) {}
+  }
+}
+
+async function buildSpecNode(spec, parent, ctx) {
+  let node;
+  if (spec.type === "TEXT") {
+    node = figma.createText();
+    const base = spec.text;
+    const fontName = await specFont(base.family, base.weight);
+    node.fontName = fontName;
+    node.characters = base.characters;
+    parent.appendChild(node);
+    const inAuto = placeInParent(node, spec, parent);
+    if (spec.textStyle && ctx.tokens.textStyles && ctx.tokens.textStyles[spec.textStyle]) {
+      await node.setTextStyleIdAsync(ctx.tokens.textStyles[spec.textStyle]);
+    } else {
+      node.fontSize = base.size;
+      node.lineHeight = base.lineHeight ? { unit: "PIXELS", value: base.lineHeight } : { unit: "AUTO" };
+      node.letterSpacing = { unit: "PIXELS", value: base.letterSpacing || 0 };
+    }
+    node.textAlignHorizontal = base.align || "LEFT";
+    if (base.decoration && base.decoration !== "NONE") node.textDecoration = base.decoration;
+    node.fills = [await boundPaint(base.fill, ctx.tokens)];
+    for (const run of base.runs || []) {
+      if (run.weight && run.weight !== base.weight) {
+        node.setRangeFontName(run.start, run.end, await specFont(base.family, run.weight));
+      }
+      if (run.size && run.size !== base.size) node.setRangeFontSize(run.start, run.end, run.size);
+      if (run.fill) node.setRangeFills(run.start, run.end, [await boundPaint(run.fill, ctx.tokens)]);
+    }
+    node.name = spec.name || base.characters.slice(0, 24);
+    if (spec.sizing && spec.sizing.h === "HUG") {
+      node.textAutoResize = "WIDTH_AND_HEIGHT";
+    } else {
+      node.textAutoResize = "HEIGHT";
+      node.resize(Math.max(spec.w, 1), Math.max(spec.h, 1));
+    }
+    if (base.maxLines) {
+      node.textTruncation = "ENDING";
+      node.maxLines = base.maxLines;
+    }
+    applySizing(node, spec, inAuto);
+  } else if (spec.type === "IMAGE") {
+    node = figma.createRectangle();
+    node.resize(Math.max(spec.w, 0.01), Math.max(spec.h, 0.01));
+    const hash = ctx.imageHashes[spec.image];
+    node.fills = hash ? [{ type: "IMAGE", imageHash: hash, scaleMode: spec.scaleMode || "FILL" }] : [{ type: "SOLID", color: { r: 0.85, g: 0.85, b: 0.85 } }];
+    node.name = spec.name || "image";
+    parent.appendChild(node);
+    const inAuto = placeInParent(node, spec, parent);
+    await applyBoxStyle(node, Object.assign({}, spec, { fills: undefined }), ctx.tokens);
+    applySizing(node, spec, inAuto);
+  } else if (spec.type === "SVG") {
+    node = figma.createNodeFromSvg(spec.svg);
+    node.name = spec.name || "icon";
+    node.fills = [];
+    node.clipsContent = false;
+    parent.appendChild(node);
+    const inAuto = placeInParent(node, spec, parent);
+    node.resize(Math.max(spec.w, 0.01), Math.max(spec.h, 0.01));
+    applySizing(node, spec, inAuto);
+  } else if (spec.type === "INSTANCE") {
+    const comp = await figma.getNodeByIdAsync(ctx.components[spec.component] || spec.componentId);
+    if (!comp) throw new Error("Unknown component: " + spec.component);
+    node = comp.createInstance();
+    parent.appendChild(node);
+    const inAuto = placeInParent(node, spec, parent);
+    if (spec.name) node.name = spec.name;
+    for (const o of spec.overrides || []) {
+      let target = node;
+      for (const i of o.path) target = target.children[i];
+      if (o.characters !== undefined && target.type === "TEXT") {
+        for (const f of target.getRangeAllFontNames(0, target.characters.length)) await figma.loadFontAsync(f);
+        target.characters = o.characters;
+      }
+      if (o.fills) {
+        const paints = [];
+        for (const f of o.fills) paints.push(await boundPaint(f, ctx.tokens));
+        target.fills = paints;
+      }
+      if (o.strokes) {
+        const paints = [];
+        for (const f of o.strokes) paints.push(await boundPaint(f, ctx.tokens));
+        target.strokes = paints;
+        if (o.strokeWeights && "strokeTopWeight" in target) {
+          const [t, r, b, l] = o.strokeWeights;
+          target.strokeTopWeight = t;
+          target.strokeRightWeight = r;
+          target.strokeBottomWeight = b;
+          target.strokeLeftWeight = l;
+        }
+      }
+      if (o.textFill && target.type === "TEXT") target.fills = [await boundPaint(o.textFill, ctx.tokens)];
+      if (o.image && ctx.imageHashes[o.image]) target.fills = [{ type: "IMAGE", imageHash: ctx.imageHashes[o.image], scaleMode: o.scaleMode || "FILL" }];
+    }
+    if ((spec.sizing || {}).h === "FIXED" || (spec.sizing || {}).v === "FIXED") {
+      node.resize(Math.max(spec.w, 0.01), Math.max(spec.h, 0.01));
+    }
+    applySizing(node, spec, inAuto);
+  } else {
+    node = spec.type === "COMPONENT" ? figma.createComponent() : figma.createFrame();
+    node.name = spec.name || "container";
+    node.resize(Math.max(spec.w, 0.01), Math.max(spec.h, 0.01));
+    node.fills = [];
+    node.clipsContent = !!spec.clips;
+    const lay = spec.layout;
+    if (lay && lay.mode && lay.mode !== "NONE") {
+      node.layoutMode = lay.mode;
+      node.layoutWrap = lay.wrap ? "WRAP" : "NO_WRAP";
+      const [pt, pr, pb, pl] = lay.padding || [0, 0, 0, 0];
+      node.paddingTop = pt;
+      node.paddingRight = pr;
+      node.paddingBottom = pb;
+      node.paddingLeft = pl;
+      node.itemSpacing = lay.gap || 0;
+      if (lay.wrap) node.counterAxisSpacing = lay.counterGap || 0;
+      node.primaryAxisAlignItems = lay.primary || "MIN";
+      node.counterAxisAlignItems = lay.counter || "MIN";
+      node.itemReverseZIndex = false;
+      node.strokesIncludedInLayout = !!spec.strokesIncluded;
+      // Turning on auto layout makes the frame hug its (still empty) content. Hold the
+      // measured size while children are added so absolute children and constraints are
+      // placed against the real box; the final sizing is applied after the children.
+      node.primaryAxisSizingMode = "FIXED";
+      node.counterAxisSizingMode = "FIXED";
+      node.resize(Math.max(spec.w, 0.01), Math.max(spec.h, 0.01));
+    }
+    if (parent) parent.appendChild(node);
+    const inAuto = placeInParent(node, spec, parent);
+    await applyBoxStyle(node, spec, ctx.tokens);
+    if (spec.description && spec.type === "COMPONENT") node.description = spec.description;
+    // scrolls in prototypes like overflow: auto does in the browser
+    if (spec.overflow) node.overflowDirection = spec.overflow;
+    if (spec.layoutGrids) node.layoutGrids = spec.layoutGrids;
+    for (const child of spec.children || []) {
+      await buildSpecNode(child, node, ctx);
+    }
+    // Size after the children exist, so HUG measures real content.
+    node.resize(Math.max(spec.w, 0.01), Math.max(spec.h, 0.01));
+    applySizing(node, spec, inAuto);
+    if (spec.minWidth) {
+      try {
+        node.minWidth = spec.minWidth;
+      } catch (e) {}
+      // note: Figma makes a hugging text child FILL once its parent has a min width;
+      // dom-to-figma.mjs centers such text so it still reads as the browser shows it
+    }
+  }
+  // Record where values came from (CSS class, table layout, ...) for later checks and edits.
+  const sz = spec.sizing || {};
+  const record = { dom: spec.dom || "", sourceW: sz.sourceW || "", sourceH: sz.sourceH || "", sourcePad: spec.sourcePad || "" };
+  for (const [k, v] of Object.entries(record)) if (v) node.setSharedPluginData("figma_local_bridge", k, String(v));
+  ctx.created.push(node.id);
+  if (spec.key) ctx.keys[spec.key] = node.id;
+  return node;
+}
+
+async function buildTree(params) {
+  const { parentId, tree, images = {}, tokens = {}, components = {}, x, y } = params || {};
+  const parent = parentId ? await figma.getNodeByIdAsync(parentId) : figma.currentPage;
+  if (!parent) throw new Error("Parent not found: " + parentId);
+  const imageHashes = {};
+  for (const [key, b64] of Object.entries(images)) {
+    if (!specCache.images.has(key)) specCache.images.set(key, figma.createImage(figma.base64Decode(b64)).hash);
+    imageHashes[key] = specCache.images.get(key);
+  }
+  for (const key of specCache.images.keys()) if (!imageHashes[key]) imageHashes[key] = specCache.images.get(key);
+  const ctx = { tokens, components, imageHashes, created: [], keys: {} };
+  const spec = Object.assign({}, tree);
+  if (x !== undefined) spec.x = x;
+  if (y !== undefined) spec.y = y;
+  const root = await buildSpecNode(spec, parent, ctx);
+  let grewBy = 0;
+  if (parent.type === "PAGE" && root.layoutMode === "VERTICAL" && root.layoutSizingVertical === "FIXED") {
+    // Figma rounds each text box up to whole pixels; on long pages this adds up and the
+    // last section (the footer) would be cut off. Grow the frame and say why.
+    const flow = root.children.filter((c) => c.layoutPositioning !== "ABSOLUTE");
+    const fills = flow.some((c) => c.layoutSizingVertical === "FILL");
+    if (!fills && flow.length) {
+      const last = flow[flow.length - 1];
+      // whole pixels, so the frame's H reads as a plain number
+      const needed = Math.ceil(last.y + last.height + root.paddingBottom - 0.01);
+      if (needed > root.height + 0.5) {
+        grewBy = Math.round((needed - root.height) * 100) / 100;
+        root.resize(root.width, needed);
+        const prev = root.getSharedPluginData("figma_local_bridge", "sourceH");
+        root.setSharedPluginData("figma_local_bridge", "sourceH", `${prev}; +${grewBy}px because Figma rounds text heights up to whole pixels`);
+      }
+    }
+  }
+  return { grewBy, rootId: root.id, name: root.name, width: root.width, height: root.height, createdCount: ctx.created.length, keys: ctx.keys };
+}
+
+async function combineVariants(params) {
+  const { componentIds, name, x, y, description } = params || {};
+  const nodes = [];
+  for (const id of componentIds) nodes.push(await figma.getNodeByIdAsync(id));
+  const parent = nodes[0].parent;
+  const set = figma.combineAsVariants(nodes, parent);
+  set.name = name;
+  if (description) set.description = description;
+  set.layoutMode = "HORIZONTAL";
+  set.layoutWrap = "WRAP";
+  set.paddingTop = 40;
+  set.paddingRight = 40;
+  set.paddingBottom = 40;
+  set.paddingLeft = 40;
+  set.itemSpacing = 40;
+  set.counterAxisSpacing = 40;
+  set.primaryAxisSizingMode = "AUTO";
+  set.counterAxisSizingMode = "AUTO";
+  set.fills = [];
+  if (x !== undefined) set.x = x;
+  if (y !== undefined) set.y = y;
+  return { id: set.id, name: set.name, width: set.width, height: set.height, variants: set.children.map((c) => ({ id: c.id, name: c.name })) };
+}
+
+async function dumpNode(node, depth, maxDepth) {
+  const out = { id: node.id, name: node.name, type: node.type };
+  if ("x" in node) Object.assign(out, { x: node.x, y: node.y, w: node.width, h: node.height });
+  if ("layoutMode" in node) {
+    out.layoutMode = node.layoutMode;
+    if (node.layoutMode !== "NONE") {
+      out.padding = [node.paddingTop, node.paddingRight, node.paddingBottom, node.paddingLeft];
+      out.itemSpacing = node.itemSpacing;
+      out.primary = node.primaryAxisAlignItems;
+      out.counter = node.counterAxisAlignItems;
+    }
+  }
+  if ("layoutSizingHorizontal" in node) {
+    try {
+      out.sizing = [node.layoutSizingHorizontal, node.layoutSizingVertical];
+    } catch (e) {}
+  }
+  if ("layoutPositioning" in node) out.positioning = node.layoutPositioning;
+  if ("minWidth" in node && node.minWidth) out.minWidth = node.minWidth;
+  if ("overflowDirection" in node && node.overflowDirection !== "NONE") out.overflowDirection = node.overflowDirection;
+  if ("layoutGrids" in node && node.layoutGrids.length) out.layoutGrids = node.layoutGrids.map((g) => g.pattern + ":" + (g.alignment || "") + ":" + (g.sectionSize || g.offset || ""));
+  if ("clipsContent" in node) out.clipsContent = node.clipsContent;
+  if ("effects" in node && node.effects.length) out.effects = node.effects.map((e) => ({ type: e.type, radius: e.radius, spread: e.spread || 0, offset: e.offset }));
+  if ("effectStyleId" in node && node.effectStyleId) out.effectStyleId = node.effectStyleId;
+  if ("fills" in node && Array.isArray(node.fills)) {
+    out.fills = node.fills.map((f) => ({ type: f.type, color: f.color ? rgbaToHex(Object.assign({ a: f.opacity === undefined ? 1 : f.opacity }, f.color)) : undefined, bound: !!(f.boundVariables && f.boundVariables.color) }));
+  }
+  const dom = node.getSharedPluginData("figma_local_bridge", "dom");
+  const sourceW = node.getSharedPluginData("figma_local_bridge", "sourceW");
+  const sourceH = node.getSharedPluginData("figma_local_bridge", "sourceH");
+  if (dom) out.dom = dom;
+  if (sourceW) out.sourceW = sourceW;
+  if (sourceH) out.sourceH = sourceH;
+  const sourcePad = node.getSharedPluginData("figma_local_bridge", "sourcePad");
+  if (sourcePad) out.sourcePad = sourcePad;
+  if ("strokeTopWeight" in node && node.strokes && node.strokes.length) {
+    out.strokeWeights = [node.strokeTopWeight, node.strokeRightWeight, node.strokeBottomWeight, node.strokeLeftWeight];
+  }
+  if (node.type === "TEXT") {
+    out.characters = node.characters;
+    out.textStyleId = typeof node.textStyleId === "string" ? node.textStyleId : "mixed";
+    out.fontSize = node.fontSize;
+  }
+  if ((node.type === "COMPONENT" || node.type === "COMPONENT_SET") && node.description) out.description = node.description;
+  if (node.type !== "PAGE" && "constraints" in node && node.layoutPositioning === "ABSOLUTE") out.constraints = node.constraints;
+  if (node.type === "INSTANCE") {
+    const main = await node.getMainComponentAsync();
+    out.mainComponentName = main ? (main.parent && main.parent.type === "COMPONENT_SET" ? main.parent.name + "/" : "") + main.name : null;
+  }
+  if ("strokes" in node && Array.isArray(node.strokes) && node.strokes.length) {
+    out.strokes = node.strokes.map((f) => ({ color: f.color ? rgbaToHex(Object.assign({ a: f.opacity === undefined ? 1 : f.opacity }, f.color)) : undefined, bound: !!(f.boundVariables && f.boundVariables.color) }));
+    out.strokeWeight = typeof node.strokeWeight === "number" ? node.strokeWeight : "mixed";
+  }
+  if ("children" in node && depth < maxDepth) {
+    out.children = [];
+    for (const c of node.children) out.children.push(await dumpNode(c, depth + 1, maxDepth));
+  }
+  else if ("children" in node) out.childCount = node.children.length;
+  return out;
+}
+
+async function dumpTree(params) {
+  const { nodeId, maxDepth = 50 } = params || {};
+  const node = nodeId ? await figma.getNodeByIdAsync(nodeId) : figma.currentPage;
+  if (!node) throw new Error("Node not found: " + nodeId);
+  if (node.type === "INSTANCE" || node.type === "COMPONENT") {
+    // make sure main component data is loaded
+  }
+  if (node.type === "PAGE") await node.loadAsync();
+  return await dumpNode(node, 0, maxDepth);
+}
+
+async function setComponentDescription(params) {
+  const node = await figma.getNodeByIdAsync(params.nodeId);
+  if (!node || (node.type !== "COMPONENT" && node.type !== "COMPONENT_SET")) throw new Error("Not a component: " + params.nodeId);
+  node.description = params.description;
+  return { id: node.id, description: node.description };
+}
+
+async function renameDocument(params) {
+  figma.root.name = params.name;
+  return { name: figma.root.name };
+}
+
+async function renameNode(params) {
+  const node = await figma.getNodeByIdAsync(params.nodeId);
+  if (!node) throw new Error("Node not found: " + params.nodeId);
+  node.name = params.name;
+  return { id: node.id, name: node.name };
+}
+
+async function moveToPage(params) {
+  const { nodeId, pageId, x, y } = params || {};
+  const node = await figma.getNodeByIdAsync(nodeId);
+  const page = await figma.getNodeByIdAsync(pageId);
+  if (!node || !page || page.type !== "PAGE") throw new Error("Node or page not found");
+  page.appendChild(node);
+  if (x !== undefined) node.x = x;
+  if (y !== undefined) node.y = y;
+  return { id: node.id, pageId: page.id };
 }
